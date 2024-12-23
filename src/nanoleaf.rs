@@ -3,45 +3,68 @@ use std::cmp::Ordering;
 use std::fs::{self, File};
 use std::io::prelude::*;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use url::Url;
 
 const NL_API_PORT: u16 = 16021;
 const NL_UDP_PORT: u16 = 60222;
 
-#[derive(Debug, Clone, Copy)]
-pub struct Panel {
+#[derive(Debug, Clone, Copy, Default)]
+struct Panel {
     id: u16,
-    pub x: i16,
-    pub y: i16,
+    x: i16,
+    y: i16,
 }
 
 #[derive(Debug)]
-pub struct Nanoleaf {
-    pub panels: Vec<Panel>,
+pub struct NanoleafDevice {
+    pub name: String,
+    pub n_panels: u16,
+    panels: Vec<Panel>,
     socket: UdpSocket,
 }
 
-#[derive(Debug)]
-pub struct Command {
-    pub panel_no: usize,
-    pub color: Hwb,
+#[derive(Debug, Default)]
+struct Command {
+    panel_no: usize,
+    color: Hwb,
+    transition_time: u16,
 }
 
-impl Nanoleaf {
-    /// Return a handle to a Nanoleaf device at the given ip address, auth token stored at the given path and
-    /// a UDP socket bound to the given port
-    pub fn new(ip: &str, port: u16, token_file_path: &Path) -> Result<Self, anyhow::Error> {
-        let ip = ip.parse::<Ipv4Addr>()?;
-        let token = Self::get_token(&ip, token_file_path)?;
-        let panels = Self::get_panels(&ip, &token)?;
-        Self::request_udp_control(&ip, &token)?;
-        let socket = Self::enable_udp_socket(&ip, port)?;
+/// ping the Nanoleaf device for its list of panels and save its token to the file
+/// error out if couldn't connect 
+pub fn save_nl_device(
+    ip: String,
+    port: u16,
+    nl_device_file: Option<&PathBuf>,
+) -> Result<(), anyhow::Error> {
+    Ok(())
+}
 
-        Ok(Nanoleaf { panels, socket })
+impl NanoleafDevice {
+    /// Parse the given device file (or try to find it at the default path).
+    /// error out if no file found (in the error message tell the user that they should supply the ip)
+    pub fn new(nl_device_file: Option<&PathBuf>) -> Result<Self, anyhow::Error> {
+        // let ip = ip.parse::<Ipv4Addr>()?;
+        // let token = Self::get_or_generate_new_token(&ip, token_file_path)?;
+        // let name = Self::get_name(&ip, &token)?;
+        // let panels = Self::get_panels(&ip, &token)?;
+        // Self::request_udp_control(&ip, &token)?;
+        // let socket = Self::enable_udp_socket(&ip, port)?;
+
+        // Ok(NanoleafDevice {
+        //     name,
+        //     n_panels: panels.len() as u16,
+        //     panels,
+        //     socket,
+        // })
+        todo!();
     }
 
-    fn get_token(ip: &Ipv4Addr, token_file_path: &Path) -> Result<String, anyhow::Error> {
+    fn get_or_generate_new_token(
+        ip: &Ipv4Addr,
+        token_file_path: &Path,
+    ) -> Result<String, anyhow::Error> {
         if !Path::try_exists(token_file_path)? {
             Self::generate_new_token(ip, token_file_path)?;
         }
@@ -49,7 +72,6 @@ impl Nanoleaf {
         Self::get_saved_token(token_file_path)
     }
 
-    /// Generate a new auth token for this Nanoleaf device and save it to a file
     fn generate_new_token(ip: &Ipv4Addr, token_file_path: &Path) -> Result<(), anyhow::Error> {
         let url = Url::parse(&format!("http://{}:{}/api/v1/new", ip, NL_API_PORT))?;
         let req_client = reqwest::blocking::Client::new();
@@ -84,7 +106,6 @@ impl Nanoleaf {
         Ok(())
     }
 
-    /// Get the token from a file
     fn get_saved_token(path: &Path) -> Result<String, anyhow::Error> {
         let mut token_file = File::open(path)?;
         let mut token = String::new();
@@ -93,7 +114,20 @@ impl Nanoleaf {
         Ok(token)
     }
 
-    /// Get data about this device's panels
+    fn get_name(ip: &Ipv4Addr, token: &str) -> Result<String, anyhow::Error> {
+        let url = Url::parse(&format!("http://{}:16021/api/v1/{}", ip, token))?;
+        let req_client = reqwest::blocking::Client::new();
+        let res = req_client
+            .get(url)
+            .send()?
+            .error_for_status()
+            .map_err(anyhow::Error::from)?;
+        let res_text = res.text()?;
+        let res_json: serde_json::Value = serde_json::from_str(&res_text)?;
+
+        Ok(String::from(res_json["name"].as_str().unwrap()))
+    }
+
     fn get_panels(ip: &Ipv4Addr, token: &str) -> Result<Vec<Panel>, anyhow::Error> {
         let url = Url::parse(&format!(
             "http://{}:16021/api/v1/{}/panelLayout/layout",
@@ -144,7 +178,6 @@ impl Nanoleaf {
         Ok(socket)
     }
 
-    /// Sort panels by comp_fn
     pub fn sort_panels<F>(&mut self, comp_fn: F)
     where
         F: FnMut(&Panel, &Panel) -> Ordering,
@@ -166,6 +199,7 @@ impl Nanoleaf {
             let Command {
                 panel_no,
                 color: color_hwb,
+                transition_time,
             } = command;
             let color_rgb = Srgb::from_color(*color_hwb).into_format::<u8>();
             let Srgb {
@@ -178,7 +212,7 @@ impl Nanoleaf {
             let mut sub_buf = [0u8; 8];
             (sub_buf[0], sub_buf[1]) = split_into_bytes(self.panels[*panel_no - 1].id);
             (sub_buf[2], sub_buf[3], sub_buf[4], sub_buf[5]) = (red, green, blue, 0);
-            (sub_buf[6], sub_buf[7]) = split_into_bytes(1);
+            (sub_buf[6], sub_buf[7]) = split_into_bytes(*transition_time);
             buf.extend(sub_buf);
         }
         self.socket.send(&buf)?;
