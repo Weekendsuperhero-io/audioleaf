@@ -1,30 +1,22 @@
 use crate::nanoleaf::NanoleafDevice;
+use crate::constants;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 
-pub const PROGRAM_NAME: &str = "audioleaf";
-pub const DEFAULT_CONFIG_FILE: &str = "audioleaf.toml";
-pub const DEFAULT_NL_DEVICE_FILE: &str = "nl_device";
-pub const DEFAULT_HOST_UDP_PORT: u16 = 6789;
-pub const DEFAULT_FREQ_RANGE: (u16, u16) = (20, 4500);
-pub const DEFAULT_DEFAULT_BOOST: f32 = 1.5;
-pub const DEFAULT_HUE_RANGE: (u16, u16) = (210, 390);
-pub const DEFAULT_TRANSITION_TIME: u16 = 2;
-pub const DEFAULT_AXIS: Axis = Axis::Y;
-pub const DEFAULT_SORT: Sort = Sort::Asc;
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Axis {
     X,
+    #[default]
     Y,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Sort {
+    #[default]
     Asc,
     Desc,
 }
@@ -44,18 +36,18 @@ pub struct Config {
     pub hues: Vec<u16>,
 }
 
-fn ok_config_path_or_default(path: Option<&PathBuf>) -> PathBuf {
+pub fn ok_path_or_default(path: Option<&PathBuf>) -> PathBuf {
     match path {
         Some(path) => path.to_owned(),
         None => dirs::config_dir()
             .unwrap()
-            .join(PROGRAM_NAME)
-            .join(DEFAULT_CONFIG_FILE),
+            .join(constants::PROGRAM_NAME)
+            .join(constants::DEFAULT_CONFIG_FILE),
     }
 }
 
 pub fn get_from_file(config_file: Option<&PathBuf>) -> Result<Option<Config>, anyhow::Error> {
-    let config_file = ok_config_path_or_default(config_file);
+    let config_file = ok_path_or_default(config_file);
     if Path::try_exists(&config_file)? {
         let mut config_file_handle = File::open(config_file)?;
         let mut toml_str = String::new();
@@ -77,7 +69,7 @@ pub fn write_and_get_default(
     config_file: Option<&PathBuf>,
     nl_device: &NanoleafDevice,
 ) -> Result<Config, anyhow::Error> {
-    let config_file = ok_config_path_or_default(config_file);
+    let config_file = ok_path_or_default(config_file);
     let config_dir = match config_file.parent() {
         Some(parent) => parent,
         None => {
@@ -89,18 +81,18 @@ pub fn write_and_get_default(
     };
     let config = Config {
         audio_device: String::from("default"),
-        min_freq: DEFAULT_FREQ_RANGE.0,
-        max_freq: DEFAULT_FREQ_RANGE.1,
-        default_boost: DEFAULT_DEFAULT_BOOST,
-        transition_time: DEFAULT_TRANSITION_TIME,
-        primary_axis: DEFAULT_AXIS,
-        sort_primary: DEFAULT_SORT,
-        sort_secondary: DEFAULT_SORT,
+        min_freq: constants::DEFAULT_FREQ_RANGE.0,
+        max_freq: constants::DEFAULT_FREQ_RANGE.1,
+        default_boost: constants::DEFAULT_DEFAULT_BOOST,
+        transition_time: constants::DEFAULT_TRANSITION_TIME,
+        primary_axis: Axis::default(),
+        sort_primary: Sort::default(),
+        sort_secondary: Sort::default(),
         active_panels_ids: (1..=nl_device.n_panels).collect::<Vec<_>>(),
-        hues: (DEFAULT_HUE_RANGE.0..=DEFAULT_HUE_RANGE.1)
+        hues: (constants::DEFAULT_HUE_RANGE.0..=constants::DEFAULT_HUE_RANGE.1)
             .rev()
             .step_by(
-                ((DEFAULT_HUE_RANGE.1 - DEFAULT_HUE_RANGE.0) / (nl_device.n_panels - 1)) as usize,
+                ((constants::DEFAULT_HUE_RANGE.1 - constants::DEFAULT_HUE_RANGE.0) / (nl_device.n_panels - 1)) as usize,
             )
             .map(|x| x % 360)
             .collect::<Vec<u16>>(),

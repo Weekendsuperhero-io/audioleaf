@@ -1,11 +1,14 @@
+use crate::constants;
 use palette::{FromColor, Hwb, Srgb};
 use std::cmp::Ordering;
 use std::fs::{self, File};
+use std::hash::Hash;
 use std::io::prelude::*;
 use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::path::{Path, PathBuf};
 use url::Url;
 
+const DEFAULT_NL_DEVICE_FILE: &str = "nl_device";
 const NL_API_PORT: u16 = 16021;
 const NL_UDP_PORT: u16 = 60222;
 
@@ -31,13 +34,49 @@ struct Command {
     transition_time: u16,
 }
 
-/// ping the Nanoleaf device for its list of panels and save its token to the file
-/// error out if couldn't connect 
-pub fn save_nl_device(
-    ip: String,
-    port: u16,
-    nl_device_file: Option<&PathBuf>,
-) -> Result<(), anyhow::Error> {
+pub fn ok_path_or_default(path: Option<&PathBuf>, ip_hash: u32) -> PathBuf {
+    match path {
+        Some(path) => path.to_owned(),
+        None => dirs::config_dir()
+            .unwrap()
+            .join(constants::PROGRAM_NAME)
+            .join(format!("{}_{}", constants::DEFAULT_NL_DEVICE_FILE, ip_hash)),
+    }
+}
+
+/// ping the Nanoleaf device and save its token to the file
+pub fn save_nl_device(ip: String, nl_device_file: Option<&PathBuf>) -> Result<(), anyhow::Error> {
+    let nl_device_file = ok_path_or_default(nl_device_file, 2137);
+    let url = Url::parse(&format!("http://{}:{}/api/v1/new", ip, NL_API_PORT))?;
+    let req_client = reqwest::blocking::Client::new();
+    let res = req_client
+        .post(url)
+        .send()?
+        .error_for_status()
+        .map_err(anyhow::Error::from)?;
+    let res_text = res.text()?;
+    let res_json: serde_json::Value = serde_json::from_str(&res_text)?;
+    let token = res_json["auth_token"]
+        .as_str()
+        .unwrap()
+        .trim_end()
+        .to_string();
+
+    let nl_device_dir = match nl_device_file.parent() {
+        Some(parent) => parent,
+        None => {
+            return Err(anyhow::Error::msg(format!(
+                "Path '{}' is invalid",
+                nl_device_file.to_string_lossy()
+            )));
+        }
+    };
+    if !Path::try_exists(nl_device_dir)? {
+        fs::create_dir(nl_device_dir)?;
+    }
+    let mut nl_device_file_handle = File::create(nl_device_file)?;
+    nl_device_file_handle.write_all(format!("{} {}", ip, token).as_bytes())?;
+
     Ok(())
 }
 
@@ -58,52 +97,17 @@ impl NanoleafDevice {
         //     panels,
         //     socket,
         // })
-        todo!();
-    }
-
-    fn get_or_generate_new_token(
-        ip: &Ipv4Addr,
-        token_file_path: &Path,
-    ) -> Result<String, anyhow::Error> {
-        if !Path::try_exists(token_file_path)? {
-            Self::generate_new_token(ip, token_file_path)?;
+        let nl_device_file = ok_path_or_default(nl_device_file);
+        if !Path::try_exists(&nl_device_file)? {
+            return Err(anyhow::Error::msg(format!("File {} not found, couldn't load data about the Nanoleaf device. Make sure to provide its IP if you're connecting to it for the first time.", nl_device_file.to_string_lossy())));
         }
 
-        Self::get_saved_token(token_file_path)
-    }
-
-    fn generate_new_token(ip: &Ipv4Addr, token_file_path: &Path) -> Result<(), anyhow::Error> {
-        let url = Url::parse(&format!("http://{}:{}/api/v1/new", ip, NL_API_PORT))?;
-        let req_client = reqwest::blocking::Client::new();
-        let res = req_client
-            .post(url)
-            .send()?
-            .error_for_status()
-            .map_err(anyhow::Error::from)?;
-        let res_text = res.text()?;
-        let res_json: serde_json::Value = serde_json::from_str(&res_text)?;
-        let token = res_json["auth_token"]
-            .as_str()
-            .unwrap()
-            .trim_end()
-            .to_string();
-
-        let token_file_dir = match token_file_path.parent() {
-            Some(parent) => parent,
-            None => {
-                return Err(anyhow::Error::msg(format!(
-                    "Path '{}' is invalid",
-                    token_file_path.to_string_lossy()
-                )));
-            }
-        };
-        if !Path::try_exists(token_file_dir)? {
-            fs::create_dir(token_file_dir)?;
-        }
-        let mut token_file = File::create(token_file_path)?;
-        token_file.write_all(token.as_bytes())?;
-
-        Ok(())
+        Ok(NanoleafDevice {
+            name,
+            n_panels: panels.len() as u16,
+            panels,
+            socket,
+        })
     }
 
     fn get_saved_token(path: &Path) -> Result<String, anyhow::Error> {
