@@ -1,29 +1,14 @@
-use crate::nanoleaf::NanoleafDevice;
 use crate::constants;
+use crate::nanoleaf::{Axis, NanoleafDevice, Sort};
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::prelude::*;
 use std::path::{Path, PathBuf};
 
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Axis {
-    X,
-    #[default]
-    Y,
-}
-
-#[derive(Clone, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Sort {
-    #[default]
-    Asc,
-    Desc,
-}
-
-// 'active_panels_ids' are used to order panels - they don't have any connection to each panel's internal multiple-digit ID
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
+    pub ip: String,
+    pub port: u16,
     pub audio_device: String,
     pub min_freq: u16,
     pub max_freq: u16,
@@ -32,44 +17,75 @@ pub struct Config {
     pub primary_axis: Axis,
     pub sort_primary: Sort,
     pub sort_secondary: Sort,
-    pub active_panels_ids: Vec<u16>,
     pub hues: Vec<u16>,
+    pub active_panels_numbers: Vec<u16>,
 }
 
-pub fn ok_path_or_default(path: Option<&PathBuf>) -> PathBuf {
-    match path {
-        Some(path) => path.to_owned(),
-        None => dirs::config_dir()
-            .unwrap()
-            .join(constants::PROGRAM_NAME)
-            .join(constants::DEFAULT_CONFIG_FILE),
-    }
-}
-
-pub fn get_from_file(config_file: Option<&PathBuf>) -> Result<Option<Config>, anyhow::Error> {
-    let config_file = ok_path_or_default(config_file);
-    if Path::try_exists(&config_file)? {
-        let mut config_file_handle = File::open(config_file)?;
-        let mut toml_str = String::new();
-        config_file_handle.read_to_string(&mut toml_str)?;
-
-        match toml::from_str(&toml_str) {
-            Ok(deserialized_config) => Ok(Some(deserialized_config)),
-            Err(e) => Err(anyhow::Error::msg(format!(
-                "Parsing the config file failed: {}",
-                e
-            ))),
+fn get_default_config_dir() -> Result<PathBuf, anyhow::Error> {
+    let config_dir = dirs::config_dir();
+    match config_dir {
+        Some(dir) => Ok(dir.join(constants::PROGRAM_NAME)),
+        None => {
+            let home_dir = dirs::home_dir();
+            match home_dir {
+                Some(dir) => Ok(dir.join(constants::PROGRAM_NAME)),
+                None => Err(anyhow::Error::msg("Couldn't access user's home directory")),
+            }
         }
-    } else {
-        Ok(None)
     }
 }
 
-pub fn write_and_get_default(
-    config_file: Option<&PathBuf>,
+pub fn resolve_config_file(path: Option<PathBuf>) -> Result<(PathBuf, bool), anyhow::Error> {
+    if let Some(path) = path {
+        if Path::try_exists(&path)? {
+            return Ok((path, true));
+        } else {
+            return Ok((path, false));
+        }
+    }
+    let default = get_default_config_dir()?.join(constants::DEFAULT_CONFIG_FILE);
+    if Path::try_exists(&default)? {
+        Ok((default, true))
+    } else {
+        Ok((default, false))
+    }
+}
+
+pub fn resolve_nl_device_file(path: Option<PathBuf>) -> Result<(PathBuf, bool), anyhow::Error> {
+    if let Some(path) = path {
+        if Path::try_exists(&path)? {
+            return Ok((path, true));
+        } else {
+            return Ok((path, false));
+        }
+    }
+    let default = get_default_config_dir()?.join(constants::DEFAULT_NL_DEVICE_FILE);
+    if Path::try_exists(&default)? {
+        Ok((default, true))
+    } else {
+        Ok((default, false))
+    }
+}
+
+pub fn get_config_from_file(config_file: &Path) -> Result<Config, anyhow::Error> {
+    let mut config_file_handle = File::open(config_file)?;
+    let mut toml_str = String::new();
+    config_file_handle.read_to_string(&mut toml_str)?;
+
+    match toml::from_str(&toml_str) {
+        Ok(deserialized_config) => Ok(deserialized_config),
+        Err(e) => Err(anyhow::Error::msg(format!(
+            "Parsing the config file failed: {}",
+            e
+        ))),
+    }
+}
+
+pub fn make_default_config(
+    config_file: &Path,
     nl_device: &NanoleafDevice,
+    port: Option<u16>,
 ) -> Result<Config, anyhow::Error> {
-    let config_file = ok_path_or_default(config_file);
     let config_dir = match config_file.parent() {
         Some(parent) => parent,
         None => {
@@ -79,7 +95,13 @@ pub fn write_and_get_default(
             )));
         }
     };
+    if !Path::try_exists(config_dir)? {
+        fs::create_dir(config_dir)?;
+    }
+
     let config = Config {
+        ip: nl_device.ip.clone(),
+        port: port.unwrap_or(constants::DEFAULT_HOST_UDP_PORT),
         audio_device: String::from("default"),
         min_freq: constants::DEFAULT_FREQ_RANGE.0,
         max_freq: constants::DEFAULT_FREQ_RANGE.1,
@@ -88,21 +110,36 @@ pub fn write_and_get_default(
         primary_axis: Axis::default(),
         sort_primary: Sort::default(),
         sort_secondary: Sort::default(),
-        active_panels_ids: (1..=nl_device.n_panels).collect::<Vec<_>>(),
+        active_panels_numbers: (1..=(nl_device.panels.len() as u16)).collect::<Vec<_>>(),
         hues: (constants::DEFAULT_HUE_RANGE.0..=constants::DEFAULT_HUE_RANGE.1)
             .rev()
             .step_by(
-                ((constants::DEFAULT_HUE_RANGE.1 - constants::DEFAULT_HUE_RANGE.0) / (nl_device.n_panels - 1)) as usize,
+                ((constants::DEFAULT_HUE_RANGE.1 - constants::DEFAULT_HUE_RANGE.0)
+                    / ((nl_device.panels.len() as u16) - 1)) as usize,
             )
             .map(|x| x % 360)
             .collect::<Vec<u16>>(),
     };
     let config_toml = toml::to_string_pretty(&config)?;
-    if !Path::try_exists(config_dir)? {
-        fs::create_dir(config_dir)?;
-    }
     let mut config_file_handle = File::create(config_file)?;
     config_file_handle.write_all(config_toml.as_bytes())?;
 
     Ok(config)
+}
+
+pub fn get_first_ip(nl_device_file: &Path) -> Result<String, anyhow::Error> {
+    let nl_devices = fs::read_to_string(nl_device_file)?;
+    if let Some(device) = nl_devices.lines().next() {
+        let split = device.split(';').collect::<Vec<_>>();
+        if split.len() != 2 {
+            return Err(anyhow::Error::msg(
+                "Invalid nl_devices file, every line should look like {IP};{TOKEN}",
+            ));
+        }
+        Ok(split[0].to_string())
+    } else {
+        Err(anyhow::Error::msg(
+            "Invalid nl_devices file, every line should look like {IP};{TOKEN}",
+        ))
+    }
 }
