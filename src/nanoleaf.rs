@@ -1,11 +1,11 @@
 use crate::constants;
+use crate::utils;
 use palette::Hwb;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, OpenOptions};
 use std::io::prelude::*;
 use std::net::Ipv4Addr;
 use std::path::Path;
-use url::Url;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -93,19 +93,13 @@ impl NanoleafDevice {
     }
 
     fn get_new_token(ip: &Ipv4Addr) -> Result<String, anyhow::Error> {
-        let url = Url::parse(&format!(
-            "http://{}:{}/api/v1/new",
-            ip,
-            constants::NL_API_PORT
-        ))?;
-        let req_client = reqwest::blocking::Client::new();
-        let res = req_client
-            .post(url)
-            .send()?
-            .error_for_status()
-            .map_err(anyhow::Error::from)?;
-        let res_text = res.text()?;
-        let res_json: serde_json::Value = serde_json::from_str(&res_text)?;
+        let Ok(res) = utils::request_post(
+            &format!("http://{}:{}/api/v1/new", ip, constants::NL_API_PORT),
+            None,
+        ) else {
+            return Err(anyhow::Error::msg(format!("Couldn't connect to the Nanoleaf device at {}, make sure that the control lights are flashing while you're trying to connect.", ip)));
+        };
+        let res_json: serde_json::Value = serde_json::from_str(&res)?;
         Ok(res_json["auth_token"]
             .as_str()
             .unwrap()
@@ -140,32 +134,35 @@ impl NanoleafDevice {
     }
 
     fn get_name(ip: &Ipv4Addr, token: &str) -> Result<String, anyhow::Error> {
-        let url = Url::parse(&format!("http://{}:16021/api/v1/{}", ip, token))?;
-        let req_client = reqwest::blocking::Client::new();
-        let res = req_client
-            .get(url)
-            .send()?
-            .error_for_status()
-            .map_err(anyhow::Error::from)?;
-        let res_text = res.text()?;
-        let res_json: serde_json::Value = serde_json::from_str(&res_text)?;
+        let Ok(res) = utils::request_get(&format!(
+            "http://{}:{}/api/v1/{}",
+            ip,
+            constants::NL_API_PORT,
+            token
+        )) else {
+            return Err(anyhow::Error::msg(format!(
+                "Couldn't reach the Nanoleaf device at {}.",
+                ip
+            )));
+        };
+        let res_json: serde_json::Value = serde_json::from_str(&res)?;
 
         Ok(String::from(res_json["name"].as_str().unwrap()))
     }
 
     fn get_panels(ip: &Ipv4Addr, token: &str) -> Result<Vec<Panel>, anyhow::Error> {
-        let url = Url::parse(&format!(
-            "http://{}:16021/api/v1/{}/panelLayout/layout",
-            ip, token
-        ))?;
-        let req_client = reqwest::blocking::Client::new();
-        let res = req_client
-            .get(url)
-            .send()?
-            .error_for_status()
-            .map_err(anyhow::Error::from)?;
-        let res_text = res.text()?;
-        let res_json: serde_json::Value = serde_json::from_str(&res_text)?;
+        let Ok(res) = utils::request_get(&format!(
+            "http://{}:{}/api/v1/{}/panelLayout/layout",
+            ip,
+            constants::NL_API_PORT,
+            token
+        )) else {
+            return Err(anyhow::Error::msg(format!(
+                "Couldn't reach the Nanoleaf device at {}.",
+                ip
+            )));
+        };
+        let res_json: serde_json::Value = serde_json::from_str(&res)?;
         let res_panels = res_json["positionData"].as_array().unwrap();
         let mut panels = Vec::new();
         for panel in res_panels.iter() {
@@ -178,6 +175,22 @@ impl NanoleafDevice {
         }
 
         Ok(panels)
+    }
+
+    pub fn get_effect_list(&self) -> Result<Vec<String>, anyhow::Error> {
+        let Ok(res) = utils::request_get(&format!(
+            "http://{}:{}/api/v1/{}/effects/effectsList",
+            self.ip,
+            constants::NL_API_PORT,
+            self.token
+        )) else {
+            return Err(anyhow::Error::msg(format!(
+                "Couldn't reach the Nanoleaf device at {}.",
+                self.ip
+            )));
+        };
+        let res_list: Vec<String> = serde_json::from_str(&res)?;
+        Ok(res_list)
     }
 
     /// Sort the primary axis according to the primary sorting order,

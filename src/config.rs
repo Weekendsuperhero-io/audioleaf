@@ -1,5 +1,6 @@
 use crate::constants;
 use crate::nanoleaf::{Axis, NanoleafDevice, Sort};
+use crate::utils;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::prelude::*;
@@ -21,20 +22,6 @@ pub struct Config {
     pub active_panels_numbers: Vec<u16>,
 }
 
-fn get_default_config_dir() -> Result<PathBuf, anyhow::Error> {
-    let config_dir = dirs::config_dir();
-    match config_dir {
-        Some(dir) => Ok(dir.join(constants::PROGRAM_NAME)),
-        None => {
-            let home_dir = dirs::home_dir();
-            match home_dir {
-                Some(dir) => Ok(dir.join(constants::PROGRAM_NAME)),
-                None => Err(anyhow::Error::msg("Couldn't access user's home directory")),
-            }
-        }
-    }
-}
-
 pub fn resolve_config_file(path: Option<PathBuf>) -> Result<(PathBuf, bool), anyhow::Error> {
     if let Some(path) = path {
         if Path::try_exists(&path)? {
@@ -43,7 +30,7 @@ pub fn resolve_config_file(path: Option<PathBuf>) -> Result<(PathBuf, bool), any
             return Ok((path, false));
         }
     }
-    let default = get_default_config_dir()?.join(constants::DEFAULT_CONFIG_FILE);
+    let default = utils::get_default_config_dir()?.join(constants::DEFAULT_CONFIG_FILE);
     if Path::try_exists(&default)? {
         Ok((default, true))
     } else {
@@ -59,7 +46,7 @@ pub fn resolve_nl_device_file(path: Option<PathBuf>) -> Result<(PathBuf, bool), 
             return Ok((path, false));
         }
     }
-    let default = get_default_config_dir()?.join(constants::DEFAULT_NL_DEVICE_FILE);
+    let default = utils::get_default_config_dir()?.join(constants::DEFAULT_NL_DEVICE_FILE);
     if Path::try_exists(&default)? {
         Ok((default, true))
     } else {

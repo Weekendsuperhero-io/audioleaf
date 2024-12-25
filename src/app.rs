@@ -1,3 +1,5 @@
+use crate::config::Config;
+use crate::nanoleaf::NanoleafDevice;
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
     layout::{Constraint, Direction, Layout, Margin},
@@ -9,8 +11,10 @@ use ratatui::{
     DefaultTerminal, Frame,
 };
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct App {
+    nl: NanoleafDevice,
+    config: Config,
     list: Vec<String>,
     list_state: ListState,
     scrollbar_state: ScrollbarState,
@@ -18,6 +22,21 @@ pub struct App {
 }
 
 impl App {
+    pub fn new(nl: NanoleafDevice, config: Config) -> Result<Self, anyhow::Error> {
+        let list = nl.get_effect_list()?;
+        let list_state = ListState::default();
+        let scrollbar_state = ScrollbarState::default();
+
+        Ok(App {
+            nl,
+            config,
+            list,
+            list_state,
+            scrollbar_state,
+            exit: false,
+        })
+    }
+
     pub fn run(&mut self, terminal: &mut DefaultTerminal) -> Result<(), anyhow::Error> {
         while !self.exit {
             terminal.draw(|frame| self.draw(frame))?;
@@ -29,8 +48,17 @@ impl App {
     fn draw(&mut self, frame: &mut Frame) {
         let layout = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(vec![Constraint::Percentage(90), Constraint::Percentage(10)])
+            .constraints(vec![
+                Constraint::Percentage(10),
+                Constraint::Percentage(80),
+                Constraint::Percentage(10),
+            ])
             .split(frame.area());
+        frame.render_widget(
+            Paragraph::new(format!("Control Panel: {}", self.nl.name))
+                .block(Block::new().borders(Borders::ALL)),
+            layout[0],
+        );
         frame.render_stateful_widget(
             List::new(self.list.clone())
                 .scroll_padding(2)
@@ -38,22 +66,22 @@ impl App {
                 .highlight_style(Style::new().italic())
                 .highlight_symbol(">> ")
                 .direction(ListDirection::TopToBottom),
-            layout[0],
+            layout[1],
             &mut self.list_state,
         );
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
                 .begin_symbol(Some("v"))
                 .end_symbol(Some("^")),
-            layout[0].inner(Margin {
+            layout[1].inner(Margin {
                 vertical: 1,
                 horizontal: 0,
             }),
             &mut self.scrollbar_state,
         );
         frame.render_widget(
-            Paragraph::new("Controls: V - toggle visualizer, J/K or Up/Down - move through the effect list, Enter - choose effect").block(Block::new().borders(Borders::ALL)),
-            layout[1],
+            Paragraph::new("Controls: Q - quit, V - toggle visualizer, J/K or Up/Down - move through the effect list, Enter - choose effect").block(Block::new().borders(Borders::ALL)),
+            layout[2],
         );
     }
 
@@ -75,7 +103,7 @@ impl App {
                 if x == 'Q' {
                     self.exit();
                 } else {
-                    self.add_to_list(format!("typed char: {}", x));
+                    // self.add_to_list(format!("typed char: {}", x));
                 }
             }
             KeyCode::Tab => self.add_to_list("tab pressed".to_string()),
@@ -101,11 +129,4 @@ impl App {
         self.list.push(s);
         self.scrollbar_state = ScrollbarState::new(self.list.len());
     }
-}
-
-fn main() -> Result<(), anyhow::Error> {
-    let mut terminal = ratatui::init();
-    let app_result = App::default().run(&mut terminal);
-    ratatui::restore();
-    app_result
 }

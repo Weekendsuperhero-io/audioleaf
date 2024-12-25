@@ -1,4 +1,3 @@
-// use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use std::net::UdpSocket;
 use std::str;
 use std::sync::mpsc;
