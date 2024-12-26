@@ -1,15 +1,17 @@
 use crate::config::Config;
+use crate::constants;
 use crate::nanoleaf::NanoleafDevice;
 use ratatui::{
-    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind},
+    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     layout::{Constraint, Direction, Layout, Margin},
     style::{Style, Stylize},
     widgets::{
-        Block, Borders, List, ListDirection, ListState, Paragraph, ScrollDirection, Scrollbar,
-        ScrollbarOrientation, ScrollbarState,
+        Block, Borders, HighlightSpacing, List, ListDirection, ListState, Paragraph,
+        ScrollDirection, Scrollbar, ScrollbarOrientation, ScrollbarState,
     },
     DefaultTerminal, Frame,
 };
+use std::time::Duration;
 
 #[derive(Debug)]
 pub struct App {
@@ -17,22 +19,23 @@ pub struct App {
     config: Config,
     list: Vec<String>,
     list_state: ListState,
-    scrollbar_state: ScrollbarState,
+    scroll: usize,
+    scroll_state: ScrollbarState,
     exit: bool,
 }
 
 impl App {
     pub fn new(nl: NanoleafDevice, config: Config) -> Result<Self, anyhow::Error> {
         let list = nl.get_effect_list()?;
-        let list_state = ListState::default();
-        let scrollbar_state = ScrollbarState::default();
+        let list_state = ListState::default().with_selected(Some(0));
 
         Ok(App {
             nl,
             config,
             list,
             list_state,
-            scrollbar_state,
+            scroll: 0,
+            scroll_state: ScrollbarState::default(),
             exit: false,
         })
     }
@@ -48,66 +51,73 @@ impl App {
     fn draw(&mut self, frame: &mut Frame) {
         let layout = Layout::default()
             .direction(Direction::Vertical)
-            .constraints(vec![
-                Constraint::Percentage(10),
-                Constraint::Percentage(80),
-                Constraint::Percentage(10),
-            ])
+            .constraints(vec![Constraint::Percentage(90), Constraint::Percentage(10)])
             .split(frame.area());
-        frame.render_widget(
-            Paragraph::new(format!("Control Panel: {}", self.nl.name))
-                .block(Block::new().borders(Borders::ALL)),
-            layout[0],
-        );
+
+        // self.list_state.select(Some(self.selected));
         frame.render_stateful_widget(
             List::new(self.list.clone())
                 .scroll_padding(2)
-                .block(Block::new().borders(Borders::BOTTOM))
+                .block(
+                    Block::new()
+                        .borders(Borders::ALL)
+                        .title_top(format!("{} Control Panel", self.nl.name)),
+                )
                 .highlight_style(Style::new().italic())
                 .highlight_symbol(">> ")
+                .highlight_spacing(HighlightSpacing::Always)
                 .direction(ListDirection::TopToBottom),
-            layout[1],
+            layout[0],
             &mut self.list_state,
         );
+
+        self.scroll_state = self.scroll_state.content_length(self.list.len());
         frame.render_stateful_widget(
             Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .begin_symbol(Some("v"))
-                .end_symbol(Some("^")),
-            layout[1].inner(Margin {
+                .track_symbol(Some("│"))
+                .begin_symbol(Some("↑"))
+                .end_symbol(Some("↓")),
+            layout[0].inner(Margin {
                 vertical: 1,
                 horizontal: 0,
             }),
-            &mut self.scrollbar_state,
+            &mut self.scroll_state,
         );
         frame.render_widget(
             Paragraph::new("Controls: Q - quit, V - toggle visualizer, J/K or Up/Down - move through the effect list, Enter - choose effect").block(Block::new().borders(Borders::ALL)),
-            layout[2],
+            layout[1],
         );
     }
 
     fn handle_events(&mut self) -> Result<(), anyhow::Error> {
-        match event::read()? {
-            Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                self.handle_key_event(key_event)
-            }
-            _ => {}
-        };
+        if event::poll(Duration::from_millis(constants::TICKRATE))? {
+            match event::read()? {
+                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                    self.handle_key_event(key_event)?
+                }
+                _ => {}
+            };
+        }
         Ok(())
     }
 
-    fn handle_key_event(&mut self, key_event: KeyEvent) {
+    fn handle_key_event(&mut self, key_event: KeyEvent) -> Result<(), anyhow::Error> {
         match key_event.code {
-            KeyCode::Up => self.scroll_by(-1),
-            KeyCode::Down => self.scroll_by(1),
-            KeyCode::Char(x) => {
-                if x == 'Q' {
-                    self.exit();
-                } else {
-                    // self.add_to_list(format!("typed char: {}", x));
+            KeyCode::Enter => self.play_effect(),
+            KeyCode::Up => Ok(self.scroll_by(-1)),
+            KeyCode::Down => Ok(self.scroll_by(1)),
+            KeyCode::Char(c) => match c {
+                'Q' => Ok(self.exit()),
+                // vim-like scrolling
+                'j' => Ok(self.scroll_by(1)),
+                'd' if key_event.modifiers.contains(KeyModifiers::CONTROL) => Ok(self.scroll_by(3)),
+                'k' => Ok(self.scroll_by(-1)),
+                'u' if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                    Ok(self.scroll_by(-3))
                 }
-            }
-            KeyCode::Tab => self.add_to_list("tab pressed".to_string()),
-            _ => {}
+                _ => Ok(()),
+            },
+            _ => Ok(()),
         }
     }
 
@@ -115,18 +125,27 @@ impl App {
         self.exit = true;
     }
 
-    fn scroll_by(&mut self, k: i16) {
-        if k < 0 {
-            self.list_state.scroll_up_by(k.unsigned_abs());
-            self.scrollbar_state.scroll(ScrollDirection::Backward);
+    fn play_effect(&self) -> Result<(), anyhow::Error> {
+        if let Some(selected) = self.list_state.selected() {
+            self.nl.play_effect(&self.list[selected])
         } else {
-            self.list_state.scroll_down_by(k as u16);
-            self.scrollbar_state.scroll(ScrollDirection::Forward);
+            Ok(())
         }
     }
 
-    fn add_to_list(&mut self, s: String) {
-        self.list.push(s);
-        self.scrollbar_state = ScrollbarState::new(self.list.len());
+    fn scroll_by(&mut self, k: i16) {
+        if k < 0 {
+            self.list_state.scroll_up_by(k.unsigned_abs());
+            self.scroll = self.scroll.saturating_sub(k.unsigned_abs() as usize);
+        } else {
+            self.list_state.scroll_down_by(k as u16);
+            self.scroll = self.scroll.saturating_add(k as usize);
+        }
+        self.scroll_state = self.scroll_state.position(self.scroll);
     }
 }
+
+// TODO:
+// - async requests
+// - why is the terminal freaking out after quitting with an error
+// - pass json to utils::request_xxx instead of strings

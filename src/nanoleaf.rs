@@ -193,6 +193,28 @@ impl NanoleafDevice {
         Ok(res_list)
     }
 
+    pub fn play_effect(&self, effect_name: &str) -> Result<(), anyhow::Error> {
+        // let data = serde_json::json!({
+        //     "select": effect_name
+        // });
+        let data = format!("{{\"select\": \"{}\"}}", effect_name);
+        let Ok(_) = utils::request_put(
+            &format!(
+                "http://{}:{}/api/v1/{}/effects",
+                self.ip,
+                constants::NL_API_PORT,
+                self.token
+            ),
+            Some(&data),
+        ) else {
+            return Err(anyhow::Error::msg(format!(
+                "Couldn't reach the Nanoleaf device at {}. Data: {}",
+                self.ip, data
+            )));
+        };
+        Ok(())
+    }
+
     /// Sort the primary axis according to the primary sorting order,
     /// and the secondary according to the secondary order
     pub fn sort_panels(&mut self, primary_axis: Axis, primary_sort: Sort, secondary_sort: Sort) {

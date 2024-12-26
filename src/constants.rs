@@ -9,3 +9,4 @@ pub const DEFAULT_HUE_RANGE: (u16, u16) = (210, 390);
 pub const DEFAULT_TRANSITION_TIME: u16 = 2;
 pub const NL_API_PORT: u16 = 16021;
 pub const NL_UDP_PORT: u16 = 60222;
+pub const TICKRATE: u64 = 16;
