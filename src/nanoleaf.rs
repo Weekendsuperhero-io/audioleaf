@@ -2,9 +2,10 @@ use crate::constants;
 use crate::utils;
 use palette::Hwb;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use std::fs::{self, OpenOptions};
 use std::io::prelude::*;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
 use std::path::Path;
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
@@ -32,9 +33,10 @@ pub struct Panel {
 
 #[derive(Debug)]
 pub struct NanoleafDevice {
-    pub ip: String,
+    pub ip: Ipv4Addr,
     pub name: String,
     pub panels: Vec<Panel>,
+    state: bool,
     token: String,
 }
 
@@ -48,8 +50,8 @@ struct Command {
 impl NanoleafDevice {
     /// Create a new Nanoleaf device handle. If a device with this IP isn't present in the device file,
     /// request its token add it there
-    pub fn new(ip: &str, nl_device_file: &Path) -> Result<Self, anyhow::Error> {
-        let ip = ip.parse::<Ipv4Addr>()?;
+    pub fn new(ip: &Ipv4Addr, nl_device_file: &Path) -> Result<Self, anyhow::Error> {
+        let ip = ip.to_owned();
         let token = match Self::find_token(&ip, nl_device_file)? {
             Some(token) => token,
             None => {
@@ -60,17 +62,15 @@ impl NanoleafDevice {
         };
         let name = Self::get_name(&ip, &token)?;
         let panels = Self::get_panels(&ip, &token)?;
+        let state = Self::get_state(&ip, &token)?;
 
         Ok(NanoleafDevice {
-            ip: ip.to_string(),
+            ip,
             name,
             panels,
+            state,
             token,
         })
-
-        // enabling UDP control will move to some other function callable from the TUI
-        // Self::request_udp_control(&ip, &token)?;
-        // let socket = Self::enable_udp_socket(&ip, port)?;
     }
 
     fn find_token(ip: &Ipv4Addr, nl_device_file: &Path) -> Result<Option<String>, anyhow::Error> {
@@ -131,6 +131,22 @@ impl NanoleafDevice {
         nl_device_file_handle.write_all(format!("{};{}\n", ip, token).as_bytes())?;
 
         Ok(())
+    }
+
+    fn get_state(ip: &Ipv4Addr, token: &str) -> Result<bool, anyhow::Error> {
+        let Ok(res) = utils::request_get(&format!(
+            "http://{}:{}/api/v1/{}/state/on",
+            ip,
+            constants::NL_API_PORT,
+            token
+        )) else {
+            return Err(anyhow::Error::msg(format!(
+                "Couldn't reach the Nanoleaf device at {}.",
+                ip
+            )));
+        };
+        let res_json: serde_json::Value = serde_json::from_str(&res)?;
+        Ok(res_json["value"].as_bool().unwrap())
     }
 
     fn get_name(ip: &Ipv4Addr, token: &str) -> Result<String, anyhow::Error> {
@@ -194,10 +210,9 @@ impl NanoleafDevice {
     }
 
     pub fn play_effect(&self, effect_name: &str) -> Result<(), anyhow::Error> {
-        // let data = serde_json::json!({
-        //     "select": effect_name
-        // });
-        let data = format!("{{\"select\": \"{}\"}}", effect_name);
+        let data = json!({
+            "select": effect_name
+        });
         let Ok(_) = utils::request_put(
             &format!(
                 "http://{}:{}/api/v1/{}/effects",
@@ -213,6 +228,55 @@ impl NanoleafDevice {
             )));
         };
         Ok(())
+    }
+
+    // pub fn toggle_state(&self) -> Result<(), anyhow::Error> {
+    //     if Self::get_state(&self.ip, &self.token)? {
+    //         Ok(Self::turn_off())
+    //     } else {
+    //         Ok(Self::turn_on())
+    //     }
+    // }
+
+    pub fn run_visualizer(&self, port: u16) -> Result<(), anyhow::Error> {
+        Self::request_external_control(self)?;
+        let socket = Self::enable_udp_socket(&self.ip, port);
+        // spin up a thread for this
+        Ok(())
+    }
+
+    fn request_external_control(&self) -> Result<(), anyhow::Error> {
+        let data = json!({
+            "write": {
+                "command": "display",
+                "animType": "extControl",
+                "extControlVersion": "v2"
+            }
+        });
+        let Ok(_) = utils::request_put(
+            &format!(
+                "http://{}:{}/api/v1/{}/effects",
+                self.ip,
+                constants::NL_API_PORT,
+                self.token
+            ),
+            Some(&data),
+        ) else {
+            return Err(anyhow::Error::msg(format!(
+                "Couldn't reach the Nanoleaf device at {}. Data: {}",
+                self.ip, data
+            )));
+        };
+        Ok(())
+    }
+
+    fn enable_udp_socket(ip: &Ipv4Addr, port: u16) -> Result<UdpSocket, anyhow::Error> {
+        let socket_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port);
+        let socket = UdpSocket::bind(socket_addr)?;
+        let nl_addr = SocketAddrV4::new(*ip, constants::NL_UDP_PORT);
+        socket.connect(nl_addr)?;
+
+        Ok(socket)
     }
 
     /// Sort the primary axis according to the primary sorting order,
@@ -251,29 +315,6 @@ impl NanoleafDevice {
         self.panels
             .sort_by(|a: &Panel, b: &Panel| sort_func(*a, *b));
     }
-
-    // fn request_udp_control(ip: &Ipv4Addr, token: &str) -> Result<(), anyhow::Error> {
-    //     let url = Url::parse(&format!("http://{}:16021/api/v1/{}/effects", ip, token))?;
-    //     let data_json = &serde_json::json!({"write": {r"command":  "display", "animType": "extControl", "extControlVersion": "v2"}});
-    //     let req_client = reqwest::blocking::Client::new();
-    //     req_client
-    //         .put(url)
-    //         .json(data_json)
-    //         .send()?
-    //         .error_for_status()
-    //         .map_err(anyhow::Error::from)?;
-    //
-    //     Ok(())
-    // }
-
-    // fn enable_udp_socket(ip: &Ipv4Addr, port: u16) -> Result<UdpSocket, anyhow::Error> {
-    //     let socket_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port);
-    //     let socket = UdpSocket::bind(socket_addr)?;
-    //     let nl_addr = SocketAddrV4::new(*ip, constants::NL_UDP_PORT);
-    //     socket.connect(nl_addr)?;
-    //
-    //     Ok(socket)
-    // }
 
     // Run commands by sending bytes through UDP, see Nanoleaf API docs, section 3.2.6.2
     // pub fn run_commands(&self, commands: Vec<Command>) -> Result<(), anyhow::Error> {

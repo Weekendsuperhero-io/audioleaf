@@ -1,6 +1,7 @@
 use crate::app::App;
 use crate::nanoleaf::NanoleafDevice;
 use clap::Parser;
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 mod app;
@@ -22,7 +23,7 @@ struct CmdOptions {
 
     /// Local IP address of the Nanoleaf device
     #[arg(long)]
-    ip: Option<String>,
+    ip: Option<Ipv4Addr>,
 
     /// Audioleaf's configuration file
     #[arg(short, long)]
@@ -38,7 +39,6 @@ struct CmdOptions {
 }
 
 fn main() -> Result<(), anyhow::Error> {
-    panic::register_backtrace_panic_handler();
     let CmdOptions {
         ssdp,
         ip,
@@ -91,9 +91,12 @@ fn main() -> Result<(), anyhow::Error> {
         config.sort_secondary,
     );
 
-    let mut terminal = ratatui::init();
+    // install a custom panic hook so that the terminal doesn't get messed up
+    // and the user can access the backtrace
+    panic::register_backtrace_panic_handler();
+    let mut terminal = utils::init_tui()?;
     let mut app = App::new(nl, config)?;
     app.run(&mut terminal)?;
-    ratatui::restore();
+    utils::destroy_tui()?;
     Ok(())
 }

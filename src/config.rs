@@ -4,11 +4,12 @@ use crate::utils;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
 use std::io::prelude::*;
+use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
-    pub ip: String,
+    pub ip: Ipv4Addr,
     pub port: u16,
     pub audio_device: String,
     pub min_freq: u16,
@@ -87,7 +88,7 @@ pub fn make_default_config(
     }
 
     let config = Config {
-        ip: nl_device.ip.clone(),
+        ip: nl_device.ip,
         port: port.unwrap_or(constants::DEFAULT_HOST_UDP_PORT),
         audio_device: String::from("default"),
         min_freq: constants::DEFAULT_FREQ_RANGE.0,
@@ -114,7 +115,7 @@ pub fn make_default_config(
     Ok(config)
 }
 
-pub fn get_first_ip(nl_device_file: &Path) -> Result<String, anyhow::Error> {
+pub fn get_first_ip(nl_device_file: &Path) -> Result<Ipv4Addr, anyhow::Error> {
     let nl_devices = fs::read_to_string(nl_device_file)?;
     if let Some(device) = nl_devices.lines().next() {
         let split = device.split(';').collect::<Vec<_>>();
@@ -123,7 +124,7 @@ pub fn get_first_ip(nl_device_file: &Path) -> Result<String, anyhow::Error> {
                 "Invalid nl_devices file, every line should look like {IP};{TOKEN}",
             ));
         }
-        Ok(split[0].to_string())
+        Ok(split[0].to_string().parse::<Ipv4Addr>()?)
     } else {
         Err(anyhow::Error::msg(
             "Invalid nl_devices file, every line should look like {IP};{TOKEN}",

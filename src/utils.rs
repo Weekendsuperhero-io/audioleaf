@@ -1,7 +1,27 @@
 use crate::constants;
+use ratatui::{
+    backend::{Backend, CrosstermBackend},
+    crossterm::{
+        execute,
+        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    },
+    Terminal,
+};
 use reqwest::blocking::Client;
-use std::path::PathBuf;
+use std::{io::stdout, path::PathBuf};
 use url::Url;
+
+pub fn init_tui() -> Result<Terminal<impl Backend>, anyhow::Error> {
+    enable_raw_mode()?;
+    execute!(stdout(), EnterAlternateScreen)?;
+    Terminal::new(CrosstermBackend::new(stdout())).map_err(anyhow::Error::from)
+}
+
+pub fn destroy_tui() -> Result<(), anyhow::Error> {
+    disable_raw_mode()?;
+    execute!(stdout(), LeaveAlternateScreen)?;
+    Ok(())
+}
 
 pub fn get_default_cache_dir() -> Result<PathBuf, anyhow::Error> {
     let config_dir = dirs::cache_dir();
@@ -31,12 +51,11 @@ pub fn get_default_config_dir() -> Result<PathBuf, anyhow::Error> {
     }
 }
 
-pub fn request_post(url: &str, data: Option<&str>) -> Result<String, anyhow::Error> {
+pub fn request_post(url: &str, data: Option<&serde_json::Value>) -> Result<String, anyhow::Error> {
     let url = Url::parse(url)?;
     let mut client = Client::new().post(url);
     if let Some(data) = data {
-        let json_data: serde_json::Value = serde_json::from_str(data)?;
-        client = client.json(&json_data);
+        client = client.json(&data);
     }
     let res = client
         .send()?
@@ -45,12 +64,11 @@ pub fn request_post(url: &str, data: Option<&str>) -> Result<String, anyhow::Err
     Ok(res.text()?.to_string())
 }
 
-pub fn request_put(url: &str, data: Option<&str>) -> Result<String, anyhow::Error> {
+pub fn request_put(url: &str, data: Option<&serde_json::Value>) -> Result<String, anyhow::Error> {
     let url = Url::parse(url)?;
     let mut client = Client::new().put(url);
     if let Some(data) = data {
-        let json_data: serde_json::Value = serde_json::from_str(data)?;
-        client = client.json(&json_data);
+        client = client.json(&data);
     }
     let res = client
         .send()?
