@@ -35,9 +35,11 @@ pub struct Panel {
 pub struct NanoleafDevice {
     pub ip: Ipv4Addr,
     pub name: String,
+    pub curr_effect: Option<String>,
     pub panels: Vec<Panel>,
     state: bool,
     token: String,
+    udp_socket: UdpSocket,
 }
 
 #[derive(Debug, Default)]
@@ -50,7 +52,7 @@ struct Command {
 impl NanoleafDevice {
     /// Create a new Nanoleaf device handle. If a device with this IP isn't present in the device file,
     /// request its token add it there
-    pub fn new(ip: &Ipv4Addr, nl_device_file: &Path) -> Result<Self, anyhow::Error> {
+    pub fn new(ip: &Ipv4Addr, nl_device_file: &Path, port: u16) -> Result<Self, anyhow::Error> {
         let ip = ip.to_owned();
         let token = match Self::find_token(&ip, nl_device_file)? {
             Some(token) => token,
@@ -61,15 +63,19 @@ impl NanoleafDevice {
             }
         };
         let name = Self::get_name(&ip, &token)?;
+        let curr_effect = Self::get_curr_effect(&ip, &token)?;
         let panels = Self::get_panels(&ip, &token)?;
         let state = Self::get_state(&ip, &token)?;
+        let udp_socket = Self::enable_udp_socket(&ip, port)?;
 
         Ok(NanoleafDevice {
             ip,
             name,
+            curr_effect,
             panels,
             state,
             token,
+            udp_socket,
         })
     }
 
@@ -166,6 +172,26 @@ impl NanoleafDevice {
         Ok(String::from(res_json["name"].as_str().unwrap()))
     }
 
+    fn get_curr_effect(ip: &Ipv4Addr, token: &str) -> Result<Option<String>, anyhow::Error> {
+        let Ok(res) = utils::request_get(&format!(
+            "http://{}:{}/api/v1/{}/effects/select",
+            ip,
+            constants::NL_API_PORT,
+            token
+        )) else {
+            return Err(anyhow::Error::msg(format!(
+                "Couldn't reach the Nanoleaf device at {}.",
+                ip
+            )));
+        };
+        let res_text: String = serde_json::from_str(&res)?;
+        if res_text == "*Solid*" || res_text == "*Dynamic*" || res_text == "*Static*" || res_text == "*ExtControl*" {
+            Ok(None)
+        } else {
+            Ok(Some(res_text))
+        }
+    }
+
     fn get_panels(ip: &Ipv4Addr, token: &str) -> Result<Vec<Panel>, anyhow::Error> {
         let Ok(res) = utils::request_get(&format!(
             "http://{}:{}/api/v1/{}/panelLayout/layout",
@@ -230,18 +256,14 @@ impl NanoleafDevice {
         Ok(())
     }
 
-    // pub fn toggle_state(&self) -> Result<(), anyhow::Error> {
-    //     if Self::get_state(&self.ip, &self.token)? {
-    //         Ok(Self::turn_off())
-    //     } else {
-    //         Ok(Self::turn_on())
-    //     }
-    // }
-
-    pub fn run_visualizer(&self, port: u16) -> Result<(), anyhow::Error> {
+    pub fn run_visualizer(&self) -> Result<(), anyhow::Error> {
         Self::request_external_control(self)?;
-        let socket = Self::enable_udp_socket(&self.ip, port);
-        // spin up a thread for this
+        // send Msg::Resume to the audio thread
+        Ok(())
+    }
+
+    pub fn pause_visualizer(&self) -> Result<(), anyhow::Error> {
+        // send Msg::Pause to the audio thread (there's a pausing function in cpal)
         Ok(())
     }
 

@@ -72,7 +72,8 @@ pub fn get_config_from_file(config_file: &Path) -> Result<Config, anyhow::Error>
 pub fn make_default_config(
     config_file: &Path,
     nl_device: &NanoleafDevice,
-    port: Option<u16>,
+    audio_device: String,
+    port: u16,
 ) -> Result<Config, anyhow::Error> {
     let config_dir = match config_file.parent() {
         Some(parent) => parent,
@@ -89,8 +90,8 @@ pub fn make_default_config(
 
     let config = Config {
         ip: nl_device.ip,
-        port: port.unwrap_or(constants::DEFAULT_HOST_UDP_PORT),
-        audio_device: String::from("default"),
+        port,
+        audio_device,
         min_freq: constants::DEFAULT_FREQ_RANGE.0,
         max_freq: constants::DEFAULT_FREQ_RANGE.1,
         default_boost: constants::DEFAULT_DEFAULT_BOOST,

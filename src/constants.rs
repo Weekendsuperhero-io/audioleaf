@@ -1,5 +1,6 @@
-pub const PROGRAM_NAME: &str = "audioleaf";
 pub const DEFAULT_HOST_UDP_PORT: u16 = 6789;
+pub const DEFAULT_AUDIO_DEVICE: &str = "default";
+pub const DEFAULT_CONFIG_DIR: &str = "audioleaf";
 pub const DEFAULT_CONFIG_FILE: &str = "config.toml";
 pub const DEFAULT_NL_DEVICE_FILE: &str = "nl_devices";
 pub const DEFAULT_BACKTRACE_FILE: &str = "audioleaf_backtrace.log";

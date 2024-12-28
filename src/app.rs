@@ -16,7 +16,14 @@ use ratatui::{
 use std::time::Duration;
 
 #[derive(Debug)]
+enum AppMode {
+    EffectsList,
+    Visualizer,
+}
+
+#[derive(Debug)]
 pub struct App {
+    app_mode: AppMode,
     nl: NanoleafDevice,
     config: Config,
     list: Vec<String>,
@@ -30,9 +37,15 @@ pub struct App {
 impl App {
     pub fn new(nl: NanoleafDevice, config: Config) -> Result<Self, anyhow::Error> {
         let list = nl.get_effect_list()?;
-        let list_state = ListState::default().with_selected(Some(0));
+        let list_pos = if let Some(ref curr_effect) = nl.curr_effect {
+            list.iter().position(|x| x == curr_effect).unwrap()
+        } else {
+            0
+        };
+        let list_state = ListState::default().with_selected(Some(list_pos));
 
         Ok(App {
+            app_mode: AppMode::EffectsList,
             nl,
             config,
             list,
@@ -92,7 +105,7 @@ impl App {
         );
 
         if self.show_help {
-            let area = Self::popup_area(frame.area(), 90, 80);
+            let area = Self::popup_area(frame.area(), 90, 75);
             frame.render_widget(Clear, area);
             frame.render_widget(
                 Paragraph::new(vec![
@@ -137,7 +150,13 @@ impl App {
                 self.exit();
                 Ok(())
             }
-            KeyCode::Enter => self.play_effect(),
+            KeyCode::Enter => {
+                if let Some(selected) = self.list_state.selected() {
+                    let effect = self.list[selected].clone();
+                    self.play_effect(&effect)?;
+                }
+                Ok(())
+            }
             KeyCode::Down => {
                 self.scroll_by(1);
                 Ok(())
@@ -154,7 +173,7 @@ impl App {
                     self.exit();
                     Ok(())
                 }
-                'V' => self.run_visualizer(),
+                'V' => self.toggle_visualizer(),
                 // vim-like scrolling
                 'j' => {
                     self.scroll_by(1);
@@ -194,16 +213,27 @@ impl App {
         self.exit = true;
     }
 
-    fn run_visualizer(&self) -> Result<(), anyhow::Error> {
-        self.nl.run_visualizer(self.config.port)
+    fn toggle_visualizer(&mut self) -> Result<(), anyhow::Error> {
+        match self.app_mode {
+            AppMode::EffectsList => {
+                self.nl.run_visualizer()?;
+                self.app_mode = AppMode::Visualizer;
+            }
+            AppMode::Visualizer => {
+                self.nl.pause_visualizer()?;
+                if let Some(effect) = self.nl.curr_effect.clone() {
+                    Self::play_effect(self, &effect)?;
+                }
+                self.app_mode = AppMode::EffectsList;
+            }
+        }
+        Ok(())
     }
 
-    fn play_effect(&self) -> Result<(), anyhow::Error> {
-        if let Some(selected) = self.list_state.selected() {
-            self.nl.play_effect(&self.list[selected])
-        } else {
-            Ok(())
-        }
+    fn play_effect(&mut self, effect: &str) -> Result<(), anyhow::Error> {
+        self.nl.play_effect(effect)?;
+        self.nl.curr_effect = Some(effect.to_string());
+        Ok(())
     }
 
     fn scroll_by(&mut self, k: i16) {

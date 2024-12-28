@@ -5,12 +5,14 @@ use std::net::Ipv4Addr;
 use std::path::PathBuf;
 
 mod app;
+mod audio;
 mod config;
 mod constants;
 mod nanoleaf;
 mod panic;
 mod ssdp;
 mod utils;
+mod visualizer;
 
 #[derive(Parser, Debug)]
 #[command(version, about, author, long_about = None)]
@@ -36,6 +38,11 @@ struct CmdOptions {
     /// Port of the UDP socket through which data will be sent to the panels
     #[arg(short, long)]
     port: Option<u16>,
+
+    /// Audio device to use as the source of data for the visualizer.
+    /// Use "none" if you don't wish to use this feature.
+    #[arg(short, long)]
+    audio_device: Option<String>,
 }
 
 fn main() -> Result<(), anyhow::Error> {
@@ -45,6 +52,7 @@ fn main() -> Result<(), anyhow::Error> {
         config_file,
         nl_device_file,
         port,
+        audio_device,
     } = CmdOptions::parse();
     if ssdp > 0 {
         ssdp::ssdp_msearch(ssdp)?;
@@ -54,42 +62,56 @@ fn main() -> Result<(), anyhow::Error> {
     let (config_file, config_file_exists) = config::resolve_config_file(config_file)?;
     let (mut nl, config) = if config_file_exists {
         let mut config = config::get_config_from_file(&config_file)?;
-        println!("Config file {} found!", config_file.to_string_lossy());
+        println!("Config file {} found", config_file.to_string_lossy());
         if let Some(ip) = ip {
             config.ip = ip;
         }
         if let Some(port) = port {
             config.port = port;
         }
-        let nl = NanoleafDevice::new(&config.ip, &nl_device_file)?;
+        if let Some(audio_device) = audio_device {
+            config.audio_device = audio_device;
+        }
+        let nl = NanoleafDevice::new(&config.ip, &nl_device_file, config.port)?;
         (nl, config)
     } else {
-        println!("No config file found!");
+        println!("No config file found");
         let ip = if let Some(ip) = ip {
             ip
         } else {
             if !nl_device_file_exists {
-                return Err(anyhow::Error::msg(format!("You don't have any Nanoleaf devices saved in your connection history ({} file) - find out\n\
-                        the IP address of your Nanoleaf device\n (which you can do by running `audioleaf --ssdp` to discover all available devices)\n\
-                        and then run `audioleaf --ip <IP>` while the control lights on your main panel are flashing.\n\
+                return Err(anyhow::Error::msg(format!("You don't have any Nanoleaf devices saved in your connection history ({} file).\n\
+                            Here's what to do:\n\
+                        -\tFind the IP address of your Nanoleaf device (which you can do by, for example, running `audioleaf --ssdp`)\n\
+                        -\tRun `audioleaf --ip <IP>` while your device is in \"pairing mode\". (You can enable this mode by\n\
+                        \tpressing and holding down the power button for ~5s - once the control lights start flashing\n\
+                        \tcyclically that means paring mode is on. \"Pairing mode\" will turn off automatically after some time.)\n\
                         For more details refer to the README.", nl_device_file.to_string_lossy())));
             }
             config::get_first_ip(&nl_device_file)?
         };
-        let nl = NanoleafDevice::new(&ip, &nl_device_file)?;
-        let config = config::make_default_config(&config_file, &nl, port)?;
+        let audio_device = audio_device.unwrap_or(constants::DEFAULT_AUDIO_DEVICE.to_string());
+        let port = port.unwrap_or(constants::DEFAULT_HOST_UDP_PORT);
+        let nl = NanoleafDevice::new(&ip, &nl_device_file, port)?;
+        let config = config::make_default_config(&config_file, &nl, audio_device, port)?;
         println!(
-            "Default configuration saved to {}!",
+            "Default configuration saved to {}",
             config_file.to_string_lossy()
         );
         (nl, config)
     };
-    println!("Connected to {}!", nl.name);
+    println!("Connected to {}", nl.name);
     nl.sort_panels(
         config.primary_axis,
         config.sort_primary,
         config.sort_secondary,
     );
+
+    let (device, sample_format, stream_config) =
+        visualizer::setup_audio_device(&config.audio_device)?;
+    println!("Using audio device \"{}\"", config.audio_device);
+    // config::validate(&config, ...)?; // for example check if hues are in 0..=360, max_freq is in range, ...
+    let tx = visualizer::setup_visualizer_thread(device, sample_format, stream_config, &config)?;
 
     // install a custom panic hook so that the terminal doesn't get messed up
     // and the user can access the backtrace

@@ -17,6 +17,7 @@ clap = { version = "4.5.16", features = ["derive"] }
 console = "0.15.8"
 cpal = "0.15.3"
 dirs = "5.0.1"
+num-complex = "0.4.6"
 palette = "0.7.6"
 ratatui = "0.29.0"
 reqwest = { version = "0.12.7", features = ["blocking", "json"] }

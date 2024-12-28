@@ -50,7 +50,7 @@ pub fn ssdp_msearch(timeout: u64) -> Result<(), anyhow::Error> {
     socket.set_read_timeout(Some(Duration::from_secs(1)))?;
 
     let (tx, rx) = mpsc::channel::<u8>();
-    println!("Listening for Nanoleaf devices, press Enter to finish");
+    println!("Listening for Nanoleaf devices, timing out in {} seconds.", timeout);
     let listening_thread = thread::spawn(move || {
         let mut buf = [0; 1 << 10];
         loop {

@@ -133,6 +133,7 @@ dependencies = [
  "console",
  "cpal",
  "dirs",
+ "num-complex",
  "palette",
  "ratatui",
  "reqwest",

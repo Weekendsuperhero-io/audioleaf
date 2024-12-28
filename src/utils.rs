@@ -40,11 +40,11 @@ pub fn get_default_cache_dir() -> Result<PathBuf, anyhow::Error> {
 pub fn get_default_config_dir() -> Result<PathBuf, anyhow::Error> {
     let config_dir = dirs::config_dir();
     match config_dir {
-        Some(dir) => Ok(dir.join(constants::PROGRAM_NAME)),
+        Some(dir) => Ok(dir.join(constants::DEFAULT_CONFIG_DIR)),
         None => {
             let home_dir = dirs::home_dir();
             match home_dir {
-                Some(dir) => Ok(dir.join(constants::PROGRAM_NAME)),
+                Some(dir) => Ok(dir.join(constants::DEFAULT_CONFIG_DIR)),
                 None => Err(anyhow::Error::msg("Couldn't access user's home directory")),
             }
         }
