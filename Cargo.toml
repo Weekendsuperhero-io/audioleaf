@@ -14,6 +14,7 @@ repository = "https://github.com/alfazet/audioleaf"
 [dependencies]
 anyhow = "1.0.86"
 clap = { version = "4.5.16", features = ["derive"] }
+cli-log = "2.1.0"
 console = "0.15.8"
 cpal = "0.15.3"
 dirs = "5.0.1"

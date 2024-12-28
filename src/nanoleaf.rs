@@ -1,6 +1,6 @@
 use crate::constants;
 use crate::utils;
-use palette::Hwb;
+use palette::{FromColor, Hwb, Srgb};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs::{self, OpenOptions};
@@ -26,7 +26,7 @@ pub enum Sort {
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct Panel {
-    id: u16,
+    pub id: u16,
     x: i16,
     y: i16,
 }
@@ -39,14 +39,14 @@ pub struct NanoleafDevice {
     pub panels: Vec<Panel>,
     state: bool,
     token: String,
-    udp_socket: UdpSocket,
+    // udp_socket: UdpSocket,
 }
 
 #[derive(Debug, Default)]
-struct Command {
-    panel_no: usize,
-    color: Hwb,
-    transition_time: u16,
+pub struct Command {
+    pub panel_no: usize,
+    pub color: Hwb,
+    pub transition_time: u16,
 }
 
 impl NanoleafDevice {
@@ -66,7 +66,7 @@ impl NanoleafDevice {
         let curr_effect = Self::get_curr_effect(&ip, &token)?;
         let panels = Self::get_panels(&ip, &token)?;
         let state = Self::get_state(&ip, &token)?;
-        let udp_socket = Self::enable_udp_socket(&ip, port)?;
+        // let udp_socket = Self::enable_udp_socket(&ip, port)?;
 
         Ok(NanoleafDevice {
             ip,
@@ -75,7 +75,7 @@ impl NanoleafDevice {
             panels,
             state,
             token,
-            udp_socket,
+            // udp_socket,
         })
     }
 
@@ -185,7 +185,11 @@ impl NanoleafDevice {
             )));
         };
         let res_text: String = serde_json::from_str(&res)?;
-        if res_text == "*Solid*" || res_text == "*Dynamic*" || res_text == "*Static*" || res_text == "*ExtControl*" {
+        if res_text == "*Solid*"
+            || res_text == "*Dynamic*"
+            || res_text == "*Static*"
+            || res_text == "*ExtControl*"
+        {
             Ok(None)
         } else {
             Ok(Some(res_text))
@@ -256,18 +260,18 @@ impl NanoleafDevice {
         Ok(())
     }
 
-    pub fn run_visualizer(&self) -> Result<(), anyhow::Error> {
-        Self::request_external_control(self)?;
-        // send Msg::Resume to the audio thread
-        Ok(())
-    }
+    // pub fn run_visualizer(&self) -> Result<(), anyhow::Error> {
+    //     Self::request_external_control(self)?;
+    //     // send Msg::Resume to the audio thread
+    //     Ok(())
+    // }
+    //
+    // pub fn pause_visualizer(&self) -> Result<(), anyhow::Error> {
+    //     // send Msg::Pause to the audio thread (there's a pausing function in cpal)
+    //     Ok(())
+    // }
 
-    pub fn pause_visualizer(&self) -> Result<(), anyhow::Error> {
-        // send Msg::Pause to the audio thread (there's a pausing function in cpal)
-        Ok(())
-    }
-
-    fn request_external_control(&self) -> Result<(), anyhow::Error> {
+    pub fn request_external_control(&self) -> Result<(), anyhow::Error> {
         let data = json!({
             "write": {
                 "command": "display",
@@ -292,10 +296,10 @@ impl NanoleafDevice {
         Ok(())
     }
 
-    fn enable_udp_socket(ip: &Ipv4Addr, port: u16) -> Result<UdpSocket, anyhow::Error> {
+    pub fn get_udp_socket(&self, port: u16) -> Result<UdpSocket, anyhow::Error> {
         let socket_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port);
         let socket = UdpSocket::bind(socket_addr)?;
-        let nl_addr = SocketAddrV4::new(*ip, constants::NL_UDP_PORT);
+        let nl_addr = SocketAddrV4::new(self.ip, constants::NL_UDP_PORT);
         socket.connect(nl_addr)?;
 
         Ok(socket)
@@ -338,38 +342,4 @@ impl NanoleafDevice {
             .sort_by(|a: &Panel, b: &Panel| sort_func(*a, *b));
     }
 
-    // Run commands by sending bytes through UDP, see Nanoleaf API docs, section 3.2.6.2
-    // pub fn run_commands(&self, commands: Vec<Command>) -> Result<(), anyhow::Error> {
-    //     let split_into_bytes = |x: u16| -> (u8, u8) {
-    //         // split a u16 into two bytes (in big endian), e.g. 651 -> (2, 139) because 651 = 2 * 256 + 139
-    //         ((x / 256) as u8, (x % 256) as u8)
-    //     };
-    //
-    //     let n_panels = commands.len();
-    //     let mut buf = vec![0; 2];
-    //     (buf[0], buf[1]) = split_into_bytes(n_panels as u16);
-    //     for command in commands.iter() {
-    //         let Command {
-    //             panel_no,
-    //             color: color_hwb,
-    //             transition_time,
-    //         } = command;
-    //         let color_rgb = Srgb::from_color(*color_hwb).into_format::<u8>();
-    //         let Srgb {
-    //             red,
-    //             green,
-    //             blue,
-    //             standard: _,
-    //         } = color_rgb;
-    //
-    //         let mut sub_buf = [0u8; 8];
-    //         (sub_buf[0], sub_buf[1]) = split_into_bytes(self.panels[*panel_no - 1].id);
-    //         (sub_buf[2], sub_buf[3], sub_buf[4], sub_buf[5]) = (red, green, blue, 0);
-    //         (sub_buf[6], sub_buf[7]) = split_into_bytes(*transition_time);
-    //         buf.extend(sub_buf);
-    //     }
-    //     self.socket.send(&buf)?;
-    //
-    //     Ok(())
-    // }
 }

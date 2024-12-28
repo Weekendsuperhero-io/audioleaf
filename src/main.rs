@@ -3,6 +3,7 @@ use crate::nanoleaf::NanoleafDevice;
 use clap::Parser;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
+use cli_log::*;
 
 mod app;
 mod audio;
@@ -46,6 +47,7 @@ struct CmdOptions {
 }
 
 fn main() -> Result<(), anyhow::Error> {
+    init_cli_log!();
     let CmdOptions {
         ssdp,
         ip,
@@ -111,14 +113,22 @@ fn main() -> Result<(), anyhow::Error> {
         visualizer::setup_audio_device(&config.audio_device)?;
     println!("Using audio device \"{}\"", config.audio_device);
     // config::validate(&config, ...)?; // for example check if hues are in 0..=360, max_freq is in range, ...
-    let tx = visualizer::setup_visualizer_thread(device, sample_format, stream_config, &config)?;
+    let panels = nl.panels.clone();
+    let (visualizer_thread, tx) = visualizer::setup_visualizer_thread(
+        device,
+        sample_format,
+        stream_config,
+        &config,
+        panels,
+    )?;
 
     // install a custom panic hook so that the terminal doesn't get messed up
     // and the user can access the backtrace
     panic::register_backtrace_panic_handler();
     let mut terminal = utils::init_tui()?;
-    let mut app = App::new(nl, config)?;
+    let mut app = App::new(nl, tx, config)?;
     app.run(&mut terminal)?;
+    visualizer_thread.join().unwrap();
     utils::destroy_tui()?;
     Ok(())
 }

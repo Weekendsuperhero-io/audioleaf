@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::constants;
 use crate::nanoleaf::NanoleafDevice;
+use crate::visualizer::VisualizerEvent;
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     layout::{Constraint, Direction, Flex, Layout, Margin, Rect},
@@ -13,6 +14,7 @@ use ratatui::{
     },
     Frame, Terminal,
 };
+use std::sync::mpsc;
 use std::time::Duration;
 
 #[derive(Debug)]
@@ -24,6 +26,7 @@ enum AppMode {
 #[derive(Debug)]
 pub struct App {
     app_mode: AppMode,
+    tx: mpsc::Sender<VisualizerEvent>,
     nl: NanoleafDevice,
     config: Config,
     list: Vec<String>,
@@ -35,7 +38,11 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(nl: NanoleafDevice, config: Config) -> Result<Self, anyhow::Error> {
+    pub fn new(
+        nl: NanoleafDevice,
+        tx: mpsc::Sender<VisualizerEvent>,
+        config: Config,
+    ) -> Result<Self, anyhow::Error> {
         let list = nl.get_effect_list()?;
         let list_pos = if let Some(ref curr_effect) = nl.curr_effect {
             list.iter().position(|x| x == curr_effect).unwrap()
@@ -45,6 +52,7 @@ impl App {
         let list_state = ListState::default().with_selected(Some(list_pos));
 
         Ok(App {
+            tx,
             app_mode: AppMode::EffectsList,
             nl,
             config,
@@ -70,35 +78,48 @@ impl App {
             .direction(Direction::Vertical)
             .constraints(vec![Constraint::Percentage(90), Constraint::Percentage(10)])
             .split(frame.area());
+        match self.app_mode {
+            AppMode::EffectsList => {
+                frame.render_stateful_widget(
+                    List::new(self.list.clone())
+                        .scroll_padding(2)
+                        .block(
+                            Block::new()
+                                .borders(Borders::ALL)
+                                .title_top(format!("{} Control Panel", self.nl.name)),
+                        )
+                        .highlight_style(Style::new().bold().cyan())
+                        .highlight_symbol(">> ")
+                        .highlight_spacing(HighlightSpacing::Always)
+                        .direction(ListDirection::TopToBottom),
+                    layout[0],
+                    &mut self.list_state,
+                );
 
-        frame.render_stateful_widget(
-            List::new(self.list.clone())
-                .scroll_padding(2)
-                .block(
-                    Block::new()
-                        .borders(Borders::ALL)
-                        .title_top(format!("{} Control Panel", self.nl.name)),
-                )
-                .highlight_style(Style::new().bold().cyan())
-                .highlight_symbol(">> ")
-                .highlight_spacing(HighlightSpacing::Always)
-                .direction(ListDirection::TopToBottom),
-            layout[0],
-            &mut self.list_state,
-        );
-
-        self.scroll_state = self.scroll_state.content_length(self.list.len());
-        frame.render_stateful_widget(
-            Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                .track_symbol(Some("│"))
-                .begin_symbol(Some("↑"))
-                .end_symbol(Some("↓")),
-            layout[0].inner(Margin {
-                vertical: 1,
-                horizontal: 0,
-            }),
-            &mut self.scroll_state,
-        );
+                self.scroll_state = self.scroll_state.content_length(self.list.len());
+                frame.render_stateful_widget(
+                    Scrollbar::new(ScrollbarOrientation::VerticalRight)
+                        .track_symbol(Some("│"))
+                        .begin_symbol(Some("↑"))
+                        .end_symbol(Some("↓")),
+                    layout[0].inner(Margin {
+                        vertical: 1,
+                        horizontal: 0,
+                    }),
+                    &mut self.scroll_state,
+                );
+            }
+            AppMode::Visualizer => {
+                frame.render_widget(
+                    Paragraph::new("Visualizer mode ON, enjoy!").block(
+                        Block::new()
+                            .borders(Borders::ALL)
+                            .title_top(format!("{} Control Panel", self.nl.name)),
+                    ).centered(),
+                    layout[0],
+                );
+            }
+        }
         frame.render_widget(
             Paragraph::new("Press '?' for help").block(Block::new().borders(Borders::ALL)),
             layout[1],
@@ -146,10 +167,7 @@ impl App {
 
     fn handle_key_event(&mut self, key_event: KeyEvent) -> Result<(), anyhow::Error> {
         match key_event.code {
-            KeyCode::Esc => {
-                self.exit();
-                Ok(())
-            }
+            KeyCode::Esc => self.exit(),
             KeyCode::Enter => {
                 if let Some(selected) = self.list_state.selected() {
                     let effect = self.list[selected].clone();
@@ -169,10 +187,7 @@ impl App {
                 // 'x' if key_event.modifiers.contains(KeyModifiers::ALT) => {
                 //     panic!("you asked for it");
                 // }
-                'Q' => {
-                    self.exit();
-                    Ok(())
-                }
+                'Q' => self.exit(),
                 'V' => self.toggle_visualizer(),
                 // vim-like scrolling
                 'j' => {
@@ -209,18 +224,23 @@ impl App {
         }
     }
 
-    fn exit(&mut self) {
+    fn exit(&mut self) -> Result<(), anyhow::Error> {
+        self.tx.send(VisualizerEvent::End)?;
         self.exit = true;
+        Ok(())
     }
 
     fn toggle_visualizer(&mut self) -> Result<(), anyhow::Error> {
         match self.app_mode {
             AppMode::EffectsList => {
-                self.nl.run_visualizer()?;
+                // self.nl.run_visualizer()?;
+                self.nl.request_external_control()?;
+                self.tx.send(VisualizerEvent::Resume(self.nl.get_udp_socket(self.config.port)?))?;
                 self.app_mode = AppMode::Visualizer;
             }
             AppMode::Visualizer => {
-                self.nl.pause_visualizer()?;
+                // self.nl.pause_visualizer()?;
+                self.tx.send(VisualizerEvent::Pause)?;
                 if let Some(effect) = self.nl.curr_effect.clone() {
                     Self::play_effect(self, &effect)?;
                 }
