@@ -1,4 +1,3 @@
-use crate::config::Config;
 use crate::constants;
 use crate::nanoleaf::NanoleafDevice;
 use crate::visualizer::VisualizerEvent;
@@ -28,7 +27,7 @@ pub struct App {
     app_mode: AppMode,
     tx: mpsc::Sender<VisualizerEvent>,
     nl: NanoleafDevice,
-    config: Config,
+    // config: Config,
     list: Vec<String>,
     list_state: ListState,
     scroll: usize,
@@ -41,11 +40,11 @@ impl App {
     pub fn new(
         nl: NanoleafDevice,
         tx: mpsc::Sender<VisualizerEvent>,
-        config: Config,
+        // config: Config,
     ) -> Result<Self, anyhow::Error> {
         let list = nl.get_effect_list()?;
         let list_pos = if let Some(ref curr_effect) = nl.curr_effect {
-            list.iter().position(|x| x == curr_effect).unwrap()
+            list.iter().position(|x| x == curr_effect).unwrap_or(0)
         } else {
             0
         };
@@ -55,7 +54,7 @@ impl App {
             tx,
             app_mode: AppMode::EffectsList,
             nl,
-            config,
+            // config,
             list,
             list_state,
             scroll: 0,
@@ -111,11 +110,13 @@ impl App {
             }
             AppMode::Visualizer => {
                 frame.render_widget(
-                    Paragraph::new("Visualizer mode ON, enjoy!").block(
-                        Block::new()
-                            .borders(Borders::ALL)
-                            .title_top(format!("{} Control Panel", self.nl.name)),
-                    ).centered(),
+                    Paragraph::new("Visualizer mode ON, enjoy!")
+                        .block(
+                            Block::new()
+                                .borders(Borders::ALL)
+                                .title_top(format!("{} Control Panel", self.nl.name)),
+                        )
+                        .centered(),
                     layout[0],
                 );
             }
@@ -233,13 +234,11 @@ impl App {
     fn toggle_visualizer(&mut self) -> Result<(), anyhow::Error> {
         match self.app_mode {
             AppMode::EffectsList => {
-                // self.nl.run_visualizer()?;
                 self.nl.request_external_control()?;
-                self.tx.send(VisualizerEvent::Resume(self.nl.get_udp_socket(self.config.port)?))?;
+                self.tx.send(VisualizerEvent::Resume)?;
                 self.app_mode = AppMode::Visualizer;
             }
             AppMode::Visualizer => {
-                // self.nl.pause_visualizer()?;
                 self.tx.send(VisualizerEvent::Pause)?;
                 if let Some(effect) = self.nl.curr_effect.clone() {
                     Self::play_effect(self, &effect)?;

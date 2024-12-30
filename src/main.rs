@@ -74,7 +74,7 @@ fn main() -> Result<(), anyhow::Error> {
         if let Some(audio_device) = audio_device {
             config.audio_device = audio_device;
         }
-        let nl = NanoleafDevice::new(&config.ip, &nl_device_file, config.port)?;
+        let nl = NanoleafDevice::new(&config.ip, &nl_device_file)?;
         (nl, config)
     } else {
         println!("No config file found");
@@ -94,7 +94,7 @@ fn main() -> Result<(), anyhow::Error> {
         };
         let audio_device = audio_device.unwrap_or(constants::DEFAULT_AUDIO_DEVICE.to_string());
         let port = port.unwrap_or(constants::DEFAULT_HOST_UDP_PORT);
-        let nl = NanoleafDevice::new(&ip, &nl_device_file, port)?;
+        let nl = NanoleafDevice::new(&ip, &nl_device_file)?;
         let config = config::make_default_config(&config_file, &nl, audio_device, port)?;
         println!(
             "Default configuration saved to {}",
@@ -114,19 +114,21 @@ fn main() -> Result<(), anyhow::Error> {
     println!("Using audio device \"{}\"", config.audio_device);
     // config::validate(&config, ...)?; // for example check if hues are in 0..=360, max_freq is in range, ...
     let panels = nl.panels.clone();
+    let udp_socket = nl.get_udp_socket(config.port)?;
     let (visualizer_thread, tx) = visualizer::setup_visualizer_thread(
         device,
         sample_format,
         stream_config,
         &config,
         panels,
+        udp_socket
     )?;
 
     // install a custom panic hook so that the terminal doesn't get messed up
     // and the user can access the backtrace
     panic::register_backtrace_panic_handler();
     let mut terminal = utils::init_tui()?;
-    let mut app = App::new(nl, tx, config)?;
+    let mut app = App::new(nl, tx)?;
     app.run(&mut terminal)?;
     visualizer_thread.join().unwrap();
     utils::destroy_tui()?;

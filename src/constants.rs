@@ -4,6 +4,7 @@ pub const DEFAULT_CONFIG_DIR: &str = "audioleaf";
 pub const DEFAULT_CONFIG_FILE: &str = "config.toml";
 pub const DEFAULT_NL_DEVICE_FILE: &str = "nl_devices";
 pub const DEFAULT_BACKTRACE_FILE: &str = "audioleaf_backtrace.log";
+pub const DEFAULT_VISUALIZER_LOG_FILE: &str = "audioleaf_visualizer.log";
 pub const DEFAULT_FREQ_RANGE: (u16, u16) = (20, 4500);
 pub const DEFAULT_DEFAULT_BOOST: f32 = 1.5;
 pub const DEFAULT_HUE_RANGE: (u16, u16) = (210, 390);

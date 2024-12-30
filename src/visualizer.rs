@@ -1,20 +1,18 @@
 use crate::config::Config;
-use crate::nanoleaf::{Command, NanoleafDevice, Panel};
-use crate::{audio, constants};
-use cli_log::*;
-use cpal::{
-    traits::*, Device, InputCallbackInfo, Sample, SampleFormat, StreamConfig, SupportedStreamConfig,
-};
-use palette::{FromColor, Hwb, Srgb};
+use crate::nanoleaf::{Command, Panel};
+use crate::{audio, constants, utils};
+use cpal::{traits::*, Device, InputCallbackInfo, Sample, SampleFormat, StreamConfig};
+use palette::{FromColor, Srgb};
+use std::io::Write;
 use std::net::UdpSocket;
 use std::sync::mpsc;
-use std::thread;
+use std::{fs, thread};
 
 #[derive(Debug)]
 pub enum VisualizerEvent {
     Pause,
     End,
-    Resume(UdpSocket), // fix this absolute garbage lol
+    Resume,
 }
 
 pub fn run_commands(
@@ -38,10 +36,7 @@ pub fn run_commands(
         } = command;
         let color_rgb = Srgb::from_color(*color_hwb).into_format::<u8>();
         let Srgb {
-            red,
-            green,
-            blue,
-            standard: _,
+            red, green, blue, ..
         } = color_rgb;
 
         let mut sub_buf = [0u8; 8];
@@ -55,18 +50,16 @@ pub fn run_commands(
     Ok(())
 }
 
-fn data_callback(data: Vec<f32>, n_channels: usize, tx: &mpsc::Sender<Vec<f32>>) {
-    let mut samples = Vec::new(); // change this to with_capacity
-    debug!("{}", data.len());
+fn send_samples(data: Vec<f32>, n_channels: usize, tx: &mpsc::Sender<Vec<f32>>) {
+    let mut samples = Vec::with_capacity(data.len()); // change this to with_capacity
     for chunk in data.chunks_exact(n_channels) {
-        // max of samples from all channels
         samples.push(
             chunk
                 .iter()
                 .fold(f32::NEG_INFINITY, |acc, x| f32::max(acc, *x)),
         );
     }
-    tx.send(samples).unwrap();
+    let _ = tx.send(samples);
 }
 
 pub fn setup_visualizer_thread(
@@ -75,8 +68,9 @@ pub fn setup_visualizer_thread(
     stream_config: StreamConfig,
     config: &Config,
     panels: Vec<Panel>,
+    udp_socket: UdpSocket,
 ) -> Result<(thread::JoinHandle<impl Send>, mpsc::Sender<VisualizerEvent>), anyhow::Error> {
-    let (transition_time, min_freq, max_freq, mut boost) = (
+    let (transition_time, min_freq, max_freq, boost) = (
         config.transition_time,
         config.min_freq,
         config.max_freq,
@@ -92,145 +86,134 @@ pub fn setup_visualizer_thread(
     let (tx_events, rx_events) = mpsc::channel();
     let visualizer_thread = thread::spawn(move || {
         let (tx_audio, rx_audio) = mpsc::channel();
-        let error_callback = move |err| warn!("{}", err); // TODO: replace this with a write to some log file
+        let error_callback = move |err| {
+            let log_path = utils::get_default_cache_dir().unwrap();
+            let log_path = log_path.join(constants::DEFAULT_VISUALIZER_LOG_FILE);
+            if let Ok(mut file) = fs::File::create(&log_path) {
+                writeln!(file, "{}", err).unwrap_or_default();
+            }
+        };
         let stream = match sample_format {
-            cpal::SampleFormat::F32 => device
-                .build_input_stream(
-                    &stream_config,
-                    move |data, _: &InputCallbackInfo| {
-                        data_callback(data.to_vec(), stream_config.channels as usize, &tx_audio)
-                    },
-                    error_callback,
-                    None,
-                )
-                .unwrap(),
-            cpal::SampleFormat::F64 => device
-                .build_input_stream(
-                    &stream_config,
-                    move |data: &[f64], _: &InputCallbackInfo| {
-                        let data_f32 =
-                            Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
-                        data_callback(data_f32, stream_config.channels as usize, &tx_audio)
-                    },
-                    error_callback,
-                    None,
-                )
-                .unwrap(),
-            cpal::SampleFormat::I8 => device
-                .build_input_stream(
-                    &stream_config,
-                    move |data: &[i8], _: &InputCallbackInfo| {
-                        let data_f32 =
-                            Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
-                        data_callback(data_f32, stream_config.channels as usize, &tx_audio)
-                    },
-                    error_callback,
-                    None,
-                )
-                .unwrap(),
-            cpal::SampleFormat::I16 => device
-                .build_input_stream(
-                    &stream_config,
-                    move |data: &[i16], _: &InputCallbackInfo| {
-                        let data_f32 =
-                            Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
-                        data_callback(data_f32, stream_config.channels as usize, &tx_audio)
-                    },
-                    error_callback,
-                    None,
-                )
-                .unwrap(),
-            cpal::SampleFormat::I32 => device
-                .build_input_stream(
-                    &stream_config,
-                    move |data: &[i32], _: &InputCallbackInfo| {
-                        let data_f32 =
-                            Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
-                        data_callback(data_f32, stream_config.channels as usize, &tx_audio)
-                    },
-                    error_callback,
-                    None,
-                )
-                .unwrap(),
-            cpal::SampleFormat::I64 => device
-                .build_input_stream(
-                    &stream_config,
-                    move |data: &[i64], _: &InputCallbackInfo| {
-                        let data_f32 =
-                            Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
-                        data_callback(data_f32, stream_config.channels as usize, &tx_audio)
-                    },
-                    error_callback,
-                    None,
-                )
-                .unwrap(),
-            cpal::SampleFormat::U8 => device
-                .build_input_stream(
-                    &stream_config,
-                    move |data: &[u8], _: &InputCallbackInfo| {
-                        let data_f32 =
-                            Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
-                        data_callback(data_f32, stream_config.channels as usize, &tx_audio)
-                    },
-                    error_callback,
-                    None,
-                )
-                .unwrap(),
-            cpal::SampleFormat::U16 => device
-                .build_input_stream(
-                    &stream_config,
-                    move |data: &[u16], _: &InputCallbackInfo| {
-                        let data_f32 =
-                            Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
-                        data_callback(data_f32, stream_config.channels as usize, &tx_audio)
-                    },
-                    error_callback,
-                    None,
-                )
-                .unwrap(),
-            cpal::SampleFormat::U32 => device
-                .build_input_stream(
-                    &stream_config,
-                    move |data: &[u32], _: &InputCallbackInfo| {
-                        let data_f32 =
-                            Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
-                        data_callback(data_f32, stream_config.channels as usize, &tx_audio)
-                    },
-                    error_callback,
-                    None,
-                )
-                .unwrap(),
-            cpal::SampleFormat::U64 => device
-                .build_input_stream(
-                    &stream_config,
-                    move |data: &[u64], _: &InputCallbackInfo| {
-                        let data_f32 =
-                            Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
-                        data_callback(data_f32, stream_config.channels as usize, &tx_audio)
-                    },
-                    error_callback,
-                    None,
-                )
-                .unwrap(),
-            // sample_format => {
-            //     return Err(anyhow::Error::msg(format!(
-            //         "Unsupported sample format: {}",
-            //         sample_format
-            //     )));
-            // }
+            cpal::SampleFormat::F32 => device.build_input_stream(
+                &stream_config,
+                move |data, _: &InputCallbackInfo| {
+                    send_samples(data.to_vec(), stream_config.channels as usize, &tx_audio)
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::F64 => device.build_input_stream(
+                &stream_config,
+                move |data: &[f64], _: &InputCallbackInfo| {
+                    let data_f32 =
+                        Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
+                    send_samples(data_f32, stream_config.channels as usize, &tx_audio)
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::I8 => device.build_input_stream(
+                &stream_config,
+                move |data: &[i8], _: &InputCallbackInfo| {
+                    let data_f32 =
+                        Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
+                    send_samples(data_f32, stream_config.channels as usize, &tx_audio)
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::I16 => device.build_input_stream(
+                &stream_config,
+                move |data: &[i16], _: &InputCallbackInfo| {
+                    let data_f32 =
+                        Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
+                    send_samples(data_f32, stream_config.channels as usize, &tx_audio)
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::I32 => device.build_input_stream(
+                &stream_config,
+                move |data: &[i32], _: &InputCallbackInfo| {
+                    let data_f32 =
+                        Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
+                    send_samples(data_f32, stream_config.channels as usize, &tx_audio)
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::I64 => device.build_input_stream(
+                &stream_config,
+                move |data: &[i64], _: &InputCallbackInfo| {
+                    let data_f32 =
+                        Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
+                    send_samples(data_f32, stream_config.channels as usize, &tx_audio)
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::U8 => device.build_input_stream(
+                &stream_config,
+                move |data: &[u8], _: &InputCallbackInfo| {
+                    let data_f32 =
+                        Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
+                    send_samples(data_f32, stream_config.channels as usize, &tx_audio)
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::U16 => device.build_input_stream(
+                &stream_config,
+                move |data: &[u16], _: &InputCallbackInfo| {
+                    let data_f32 =
+                        Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
+                    send_samples(data_f32, stream_config.channels as usize, &tx_audio)
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::U32 => device.build_input_stream(
+                &stream_config,
+                move |data: &[u32], _: &InputCallbackInfo| {
+                    let data_f32 =
+                        Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
+                    send_samples(data_f32, stream_config.channels as usize, &tx_audio)
+                },
+                error_callback,
+                None,
+            ),
+            cpal::SampleFormat::U64 => device.build_input_stream(
+                &stream_config,
+                move |data: &[u64], _: &InputCallbackInfo| {
+                    let data_f32 =
+                        Vec::from_iter(data.iter().map(|sample| sample.to_sample::<f32>()));
+                    send_samples(data_f32, stream_config.channels as usize, &tx_audio)
+                },
+                error_callback,
+                None,
+            ),
             _ => {
+                // write to a log
                 return;
             }
         };
+        if stream.is_err() {
+            // write to a log
+            return;
+        }
+        let stream = stream.unwrap();
         let _ = stream.play();
 
         let (mut pause, mut end) = (true, false);
-        let mut udp_socket = None;
         loop {
             if let Ok(event) = rx_events.try_recv() {
                 match event {
-                    VisualizerEvent::Pause => pause = true,
-                    VisualizerEvent::End => end = true,
+                    VisualizerEvent::Pause => {
+                        pause = true;
+                    }
+                    VisualizerEvent::End => {
+                        end = true;
+                    }
                     _ => (),
                 }
             }
@@ -238,9 +221,8 @@ pub fn setup_visualizer_thread(
                 loop {
                     if let Ok(event) = rx_events.recv() {
                         match event {
-                            VisualizerEvent::Resume(socket) => {
+                            VisualizerEvent::Resume => {
                                 pause = false;
-                                udp_socket = Some(socket);
                                 break;
                             }
                             VisualizerEvent::End => {
@@ -257,7 +239,8 @@ pub fn setup_visualizer_thread(
             }
 
             let mut samples = Vec::with_capacity(sample_rate as usize);
-            while samples.len() < (sample_rate as usize) / 10 { // make this a configurable parameter, 10 is a nice default (maybe try 8)
+            while samples.len() < (sample_rate as usize) / 10 {
+                // make this a configurable parameter, 10 is a nice default (maybe try 8)
                 if let Ok(mut new_samples) = rx_audio.recv() {
                     samples.append(&mut new_samples);
                 }
@@ -274,10 +257,8 @@ pub fn setup_visualizer_thread(
                     transition_time,
                 })
                 .collect::<Vec<_>>();
-            if let Some(udp_socket) = &udp_socket {
-                if run_commands(commands, &panels, udp_socket).is_err() {
-                    end = true;
-                }
+            if run_commands(commands, &panels, &udp_socket).is_err() {
+                end = true;
             }
         }
     });

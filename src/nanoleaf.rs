@@ -1,6 +1,6 @@
 use crate::constants;
 use crate::utils;
-use palette::{FromColor, Hwb, Srgb};
+use palette::Hwb;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs::{self, OpenOptions};
@@ -37,9 +37,7 @@ pub struct NanoleafDevice {
     pub name: String,
     pub curr_effect: Option<String>,
     pub panels: Vec<Panel>,
-    state: bool,
     token: String,
-    // udp_socket: UdpSocket,
 }
 
 #[derive(Debug, Default)]
@@ -52,7 +50,7 @@ pub struct Command {
 impl NanoleafDevice {
     /// Create a new Nanoleaf device handle. If a device with this IP isn't present in the device file,
     /// request its token add it there
-    pub fn new(ip: &Ipv4Addr, nl_device_file: &Path, port: u16) -> Result<Self, anyhow::Error> {
+    pub fn new(ip: &Ipv4Addr, nl_device_file: &Path) -> Result<Self, anyhow::Error> {
         let ip = ip.to_owned();
         let token = match Self::find_token(&ip, nl_device_file)? {
             Some(token) => token,
@@ -65,17 +63,13 @@ impl NanoleafDevice {
         let name = Self::get_name(&ip, &token)?;
         let curr_effect = Self::get_curr_effect(&ip, &token)?;
         let panels = Self::get_panels(&ip, &token)?;
-        let state = Self::get_state(&ip, &token)?;
-        // let udp_socket = Self::enable_udp_socket(&ip, port)?;
 
         Ok(NanoleafDevice {
             ip,
             name,
             curr_effect,
             panels,
-            state,
             token,
-            // udp_socket,
         })
     }
 
@@ -137,22 +131,6 @@ impl NanoleafDevice {
         nl_device_file_handle.write_all(format!("{};{}\n", ip, token).as_bytes())?;
 
         Ok(())
-    }
-
-    fn get_state(ip: &Ipv4Addr, token: &str) -> Result<bool, anyhow::Error> {
-        let Ok(res) = utils::request_get(&format!(
-            "http://{}:{}/api/v1/{}/state/on",
-            ip,
-            constants::NL_API_PORT,
-            token
-        )) else {
-            return Err(anyhow::Error::msg(format!(
-                "Couldn't reach the Nanoleaf device at {}.",
-                ip
-            )));
-        };
-        let res_json: serde_json::Value = serde_json::from_str(&res)?;
-        Ok(res_json["value"].as_bool().unwrap())
     }
 
     fn get_name(ip: &Ipv4Addr, token: &str) -> Result<String, anyhow::Error> {
@@ -221,6 +199,15 @@ impl NanoleafDevice {
         }
 
         Ok(panels)
+    }
+
+    pub fn get_udp_socket(&self, port: u16) -> Result<UdpSocket, anyhow::Error> {
+        let socket_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port);
+        let socket = UdpSocket::bind(socket_addr)?;
+        let nl_addr = SocketAddrV4::new(self.ip, constants::NL_UDP_PORT);
+        socket.connect(nl_addr)?;
+
+        Ok(socket)
     }
 
     pub fn get_effect_list(&self) -> Result<Vec<String>, anyhow::Error> {
@@ -296,15 +283,6 @@ impl NanoleafDevice {
         Ok(())
     }
 
-    pub fn get_udp_socket(&self, port: u16) -> Result<UdpSocket, anyhow::Error> {
-        let socket_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port);
-        let socket = UdpSocket::bind(socket_addr)?;
-        let nl_addr = SocketAddrV4::new(self.ip, constants::NL_UDP_PORT);
-        socket.connect(nl_addr)?;
-
-        Ok(socket)
-    }
-
     /// Sort the primary axis according to the primary sorting order,
     /// and the secondary according to the secondary order
     pub fn sort_panels(&mut self, primary_axis: Axis, primary_sort: Sort, secondary_sort: Sort) {
@@ -341,5 +319,4 @@ impl NanoleafDevice {
         self.panels
             .sort_by(|a: &Panel, b: &Panel| sort_func(*a, *b));
     }
-
 }
