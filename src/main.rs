@@ -1,9 +1,9 @@
 use crate::app::App;
 use crate::nanoleaf::NanoleafDevice;
 use clap::Parser;
+use cli_log::*;
 use std::net::Ipv4Addr;
 use std::path::PathBuf;
-use cli_log::*;
 
 mod app;
 mod audio;
@@ -66,15 +66,15 @@ fn main() -> Result<(), anyhow::Error> {
         let mut config = config::get_config_from_file(&config_file)?;
         println!("Config file {} found", config_file.to_string_lossy());
         if let Some(ip) = ip {
-            config.ip = ip;
+            config.cli_options.ip = ip;
         }
         if let Some(port) = port {
-            config.port = port;
+            config.cli_options.port = port;
         }
         if let Some(audio_device) = audio_device {
-            config.audio_device = audio_device;
+            config.visualizer_options.audio_device = audio_device;
         }
-        let nl = NanoleafDevice::new(&config.ip, &nl_device_file)?;
+        let nl = NanoleafDevice::new(&config.cli_options.ip, &nl_device_file)?;
         (nl, config)
     } else {
         println!("No config file found");
@@ -95,7 +95,8 @@ fn main() -> Result<(), anyhow::Error> {
         let audio_device = audio_device.unwrap_or(constants::DEFAULT_AUDIO_DEVICE.to_string());
         let port = port.unwrap_or(constants::DEFAULT_HOST_UDP_PORT);
         let nl = NanoleafDevice::new(&ip, &nl_device_file)?;
-        let config = config::make_default_config(&config_file, &nl, audio_device, port)?;
+        let config =
+            config::make_default_config(&config_file, audio_device, port, nl.panels.len(), nl.ip)?;
         println!(
             "Default configuration saved to {}",
             config_file.to_string_lossy()
@@ -104,31 +105,31 @@ fn main() -> Result<(), anyhow::Error> {
     };
     println!("Connected to {}", nl.name);
     nl.sort_panels(
-        config.primary_axis,
-        config.sort_primary,
-        config.sort_secondary,
+        config.visualizer_options.primary_axis,
+        config.visualizer_options.sort_primary,
+        config.visualizer_options.sort_secondary,
     );
 
     let (device, sample_format, stream_config) =
-        visualizer::setup_audio_device(&config.audio_device)?;
-    println!("Using audio device \"{}\"", config.audio_device);
+        visualizer::setup_audio_device(&config.visualizer_options.audio_device)?;
+    println!("Using audio device \"{}\"", config.visualizer_options.audio_device);
     // config::validate(&config, ...)?; // for example check if hues are in 0..=360, max_freq is in range, ...
     let panels = nl.panels.clone();
-    let udp_socket = nl.get_udp_socket(config.port)?;
+    let udp_socket = nl.get_udp_socket(config.cli_options.port)?;
     let (visualizer_thread, tx) = visualizer::setup_visualizer_thread(
+        config.visualizer_options,
         device,
         sample_format,
         stream_config,
-        &config,
         panels,
-        udp_socket
+        udp_socket,
     )?;
 
     // install a custom panic hook so that the terminal doesn't get messed up
     // and the user can access the backtrace
     panic::register_backtrace_panic_handler();
     let mut terminal = utils::init_tui()?;
-    let mut app = App::new(nl, tx)?;
+    let mut app = App::new(nl, tx)?; // later pass config.tui_options
     app.run(&mut terminal)?;
     visualizer_thread.join().unwrap();
     utils::destroy_tui()?;

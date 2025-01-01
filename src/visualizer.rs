@@ -1,7 +1,8 @@
-use crate::config::Config;
-use crate::nanoleaf::{Command, Panel};
+use crate::config::VisualizerOptions;
+use crate::nanoleaf::Panel;
 use crate::{audio, constants, utils};
 use cpal::{traits::*, Device, InputCallbackInfo, Sample, SampleFormat, StreamConfig};
+use palette::Hwb;
 use palette::{FromColor, Srgb};
 use std::io::Write;
 use std::net::UdpSocket;
@@ -15,13 +16,20 @@ pub enum VisualizerEvent {
     Resume,
 }
 
+#[derive(Debug, Default)]
+pub struct Command {
+    pub panel_no: usize,
+    pub color: Hwb,
+    pub transition_time: u16,
+}
+
 pub fn run_commands(
     commands: Vec<Command>,
     panels: &[Panel],
     udp_socket: &UdpSocket,
 ) -> Result<(), anyhow::Error> {
     let split_into_bytes = |x: u16| -> (u8, u8) {
-        // split a u16 into two bytes (in big endian), e.g. 651 -> (2, 139) because 651 = 2 * 256 + 139
+        // split a u16 into two bytes (in big endian), e.g. 2137 -> (8, 89) because 2137 = 8 * 256 + 89
         ((x / 256) as u8, (x % 256) as u8)
     };
 
@@ -51,7 +59,7 @@ pub fn run_commands(
 }
 
 fn send_samples(data: Vec<f32>, n_channels: usize, tx: &mpsc::Sender<Vec<f32>>) {
-    let mut samples = Vec::with_capacity(data.len()); // change this to with_capacity
+    let mut samples = Vec::with_capacity(data.len());
     for chunk in data.chunks_exact(n_channels) {
         samples.push(
             chunk
@@ -63,25 +71,25 @@ fn send_samples(data: Vec<f32>, n_channels: usize, tx: &mpsc::Sender<Vec<f32>>) 
 }
 
 pub fn setup_visualizer_thread(
+    visualizer_options: VisualizerOptions,
     device: Device,
     sample_format: SampleFormat,
     stream_config: StreamConfig,
-    config: &Config,
     panels: Vec<Panel>,
     udp_socket: UdpSocket,
 ) -> Result<(thread::JoinHandle<impl Send>, mpsc::Sender<VisualizerEvent>), anyhow::Error> {
     let (transition_time, min_freq, max_freq, boost) = (
-        config.transition_time,
-        config.min_freq,
-        config.max_freq,
-        config.default_boost,
+        visualizer_options.transition_time,
+        visualizer_options.min_freq,
+        visualizer_options.max_freq,
+        visualizer_options.default_boost,
     );
-    let mut colors = config
+    let mut colors = visualizer_options
         .hues
         .iter()
         .map(|hue| palette::Hwb::new(*hue as f32, 1.0, 0.0))
         .collect::<Vec<_>>();
-    let active_panels_numbers = config.active_panels_numbers.clone();
+    let active_panels_numbers = visualizer_options.active_panels_numbers.clone();
     let sample_rate = stream_config.sample_rate.0;
     let (tx_events, rx_events) = mpsc::channel();
     let visualizer_thread = thread::spawn(move || {
@@ -239,8 +247,9 @@ pub fn setup_visualizer_thread(
             }
 
             let mut samples = Vec::with_capacity(sample_rate as usize);
-            while samples.len() < (sample_rate as usize) / 10 {
-                // make this a configurable parameter, 10 is a nice default (maybe try 8)
+            let to_collect =
+                ((sample_rate as f32) * visualizer_options.time_window).round() as usize;
+            while samples.len() < to_collect {
                 if let Ok(mut new_samples) = rx_audio.recv() {
                     samples.append(&mut new_samples);
                 }

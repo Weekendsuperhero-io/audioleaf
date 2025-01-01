@@ -1,10 +1,13 @@
 use crate::constants;
+use palette::rgb::Srgb;
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     crossterm::{
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     },
+    style::{Color, Stylize},
+    text::Line,
     Terminal,
 };
 use reqwest::blocking::Client;
@@ -85,4 +88,18 @@ pub fn request_get(url: &str) -> Result<String, anyhow::Error> {
         .error_for_status()
         .map_err(anyhow::Error::from)?;
     Ok(res.text()?.to_string())
+}
+
+pub fn colorize_effect_name<'a>(effect_name: &'a str, colors: &'a [Srgb<u8>]) -> Line<'a> {
+    let chars = effect_name.chars().map(|c| c.to_string());
+    Line::from(
+        chars
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| {
+                let color = colors[i % colors.len()];
+                c.fg(Color::Rgb(color.red, color.green, color.blue))
+            })
+            .collect::<Vec<_>>(),
+    )
 }

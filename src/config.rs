@@ -1,5 +1,5 @@
 use crate::constants;
-use crate::nanoleaf::{Axis, NanoleafDevice, Sort};
+use crate::nanoleaf::{Axis, Sort};
 use crate::utils;
 use serde::{Deserialize, Serialize};
 use std::fs::{self, File};
@@ -8,19 +8,31 @@ use std::net::Ipv4Addr;
 use std::path::{Path, PathBuf};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct Config {
+pub struct CliOptions {
     pub ip: Ipv4Addr,
     pub port: u16,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct VisualizerOptions {
     pub audio_device: String,
     pub min_freq: u16,
     pub max_freq: u16,
     pub default_boost: f32,
+    pub time_window: f32,
     pub transition_time: u16,
     pub primary_axis: Axis,
     pub sort_primary: Sort,
     pub sort_secondary: Sort,
     pub hues: Vec<u16>,
     pub active_panels_numbers: Vec<u16>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct Config {
+    pub cli_options: CliOptions,
+    // pub tui_options: TuiOptions,
+    pub visualizer_options: VisualizerOptions,
 }
 
 pub fn resolve_config_file(path: Option<PathBuf>) -> Result<(PathBuf, bool), anyhow::Error> {
@@ -71,9 +83,10 @@ pub fn get_config_from_file(config_file: &Path) -> Result<Config, anyhow::Error>
 
 pub fn make_default_config(
     config_file: &Path,
-    nl_device: &NanoleafDevice,
     audio_device: String,
     port: u16,
+    n_panels: usize,
+    ip: Ipv4Addr,
 ) -> Result<Config, anyhow::Error> {
     let config_dir = match config_file.parent() {
         Some(parent) => parent,
@@ -88,26 +101,30 @@ pub fn make_default_config(
         fs::create_dir(config_dir)?;
     }
 
-    let config = Config {
-        ip: nl_device.ip,
-        port,
+    let cli_options = CliOptions { ip, port };
+    let visualizer_options = VisualizerOptions {
         audio_device,
         min_freq: constants::DEFAULT_FREQ_RANGE.0,
         max_freq: constants::DEFAULT_FREQ_RANGE.1,
-        default_boost: constants::DEFAULT_DEFAULT_BOOST,
+        default_boost: constants::DEFAULT_BOOST,
         transition_time: constants::DEFAULT_TRANSITION_TIME,
+        time_window: constants::DEFAULT_TIME_WINDOW,
         primary_axis: Axis::default(),
         sort_primary: Sort::default(),
         sort_secondary: Sort::default(),
-        active_panels_numbers: (1..=(nl_device.panels.len() as u16)).collect::<Vec<_>>(),
+        active_panels_numbers: (1..=(n_panels as u16)).collect::<Vec<_>>(),
         hues: (constants::DEFAULT_HUE_RANGE.0..=constants::DEFAULT_HUE_RANGE.1)
             .rev()
             .step_by(
                 ((constants::DEFAULT_HUE_RANGE.1 - constants::DEFAULT_HUE_RANGE.0)
-                    / ((nl_device.panels.len() as u16) - 1)) as usize,
+                    / ((n_panels as u16) - 1)) as usize,
             )
             .map(|x| x % 360)
             .collect::<Vec<u16>>(),
+    };
+    let config = Config {
+        cli_options,
+        visualizer_options,
     };
     let config_toml = toml::to_string_pretty(&config)?;
     let mut config_file_handle = File::create(config_file)?;

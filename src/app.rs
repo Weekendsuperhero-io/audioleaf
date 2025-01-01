@@ -1,6 +1,7 @@
-use crate::constants;
 use crate::nanoleaf::NanoleafDevice;
+use crate::utils;
 use crate::visualizer::VisualizerEvent;
+use crate::{constants, nanoleaf::Effect};
 use ratatui::{
     crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
     layout::{Constraint, Direction, Flex, Layout, Margin, Rect},
@@ -8,8 +9,8 @@ use ratatui::{
     style::{Style, Stylize},
     text::Line,
     widgets::{
-        Block, Borders, Clear, HighlightSpacing, List, ListDirection, ListState, Paragraph,
-        Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Block, Borders, Clear, HighlightSpacing, List, ListDirection, ListItem, ListState,
+        Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
     },
     Frame, Terminal,
 };
@@ -28,11 +29,12 @@ pub struct App {
     tx: mpsc::Sender<VisualizerEvent>,
     nl: NanoleafDevice,
     // config: Config,
-    list: Vec<String>,
+    list: Vec<Effect>,
     list_state: ListState,
     scroll: usize,
     scroll_state: ScrollbarState,
     show_help: bool,
+    use_colors: bool,
     exit: bool,
 }
 
@@ -44,7 +46,9 @@ impl App {
     ) -> Result<Self, anyhow::Error> {
         let list = nl.get_effect_list()?;
         let list_pos = if let Some(ref curr_effect) = nl.curr_effect {
-            list.iter().position(|x| x == curr_effect).unwrap_or(0)
+            list.iter()
+                .position(|x| x.name == *curr_effect)
+                .unwrap_or(0)
         } else {
             0
         };
@@ -60,6 +64,7 @@ impl App {
             scroll: 0,
             scroll_state: ScrollbarState::default(),
             show_help: false,
+            use_colors: true, // add an option to disable with a cli argument
             exit: false,
         })
     }
@@ -80,17 +85,24 @@ impl App {
         match self.app_mode {
             AppMode::EffectsList => {
                 frame.render_stateful_widget(
-                    List::new(self.list.clone())
-                        .scroll_padding(2)
-                        .block(
-                            Block::new()
-                                .borders(Borders::ALL)
-                                .title_top(format!("{} Control Panel", self.nl.name)),
-                        )
-                        .highlight_style(Style::new().bold().cyan())
-                        .highlight_symbol(">> ")
-                        .highlight_spacing(HighlightSpacing::Always)
-                        .direction(ListDirection::TopToBottom),
+                    List::new(self.list.iter().map(|x| {
+                        let name = x.name.as_str();
+                        if self.use_colors {
+                            ListItem::new(utils::colorize_effect_name(name, &x.colors))
+                        } else {
+                            ListItem::new(name)
+                        }
+                    }))
+                    .scroll_padding(2)
+                    .block(
+                        Block::new()
+                            .borders(Borders::ALL)
+                            .title_top(format!("{} Control Panel", self.nl.name)),
+                    )
+                    .highlight_style(Style::new().bold())
+                    .highlight_symbol(">> ")
+                    .highlight_spacing(HighlightSpacing::Always)
+                    .direction(ListDirection::TopToBottom),
                     layout[0],
                     &mut self.list_state,
                 );
@@ -172,7 +184,7 @@ impl App {
             KeyCode::Enter => {
                 if let Some(selected) = self.list_state.selected() {
                     let effect = self.list[selected].clone();
-                    self.play_effect(&effect)?;
+                    self.play_effect(&effect.name)?;
                 }
                 Ok(())
             }

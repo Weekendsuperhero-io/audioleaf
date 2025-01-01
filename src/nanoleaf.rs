@@ -1,6 +1,6 @@
 use crate::constants;
 use crate::utils;
-use palette::Hwb;
+use palette::{hsv::Hsv, rgb::Srgb, FromColor};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs::{self, OpenOptions};
@@ -31,6 +31,12 @@ pub struct Panel {
     y: i16,
 }
 
+#[derive(Clone, Debug)]
+pub struct Effect {
+    pub name: String,
+    pub colors: Vec<Srgb<u8>>,
+}
+
 #[derive(Debug)]
 pub struct NanoleafDevice {
     pub ip: Ipv4Addr,
@@ -38,13 +44,6 @@ pub struct NanoleafDevice {
     pub curr_effect: Option<String>,
     pub panels: Vec<Panel>,
     token: String,
-}
-
-#[derive(Debug, Default)]
-pub struct Command {
-    pub panel_no: usize,
-    pub color: Hwb,
-    pub transition_time: u16,
 }
 
 impl NanoleafDevice {
@@ -210,7 +209,7 @@ impl NanoleafDevice {
         Ok(socket)
     }
 
-    pub fn get_effect_list(&self) -> Result<Vec<String>, anyhow::Error> {
+    pub fn get_effect_list(&self) -> Result<Vec<Effect>, anyhow::Error> {
         let Ok(res) = utils::request_get(&format!(
             "http://{}:{}/api/v1/{}/effects/effectsList",
             self.ip,
@@ -223,7 +222,48 @@ impl NanoleafDevice {
             )));
         };
         let res_list: Vec<String> = serde_json::from_str(&res)?;
-        Ok(res_list)
+        let mut palettes = Vec::with_capacity(res_list.len());
+        for effect_name in res_list.iter() {
+            let data = json!({
+                "write": {
+                    "command": "request",
+                    "animName": effect_name,
+                }
+            });
+            let Ok(res) = utils::request_put(
+                &format!(
+                    "http://{}:{}/api/v1/{}/effects/effectsList",
+                    self.ip,
+                    constants::NL_API_PORT,
+                    self.token
+                ),
+                Some(&data),
+            ) else {
+                return Err(anyhow::Error::msg(format!(
+                    "Couldn't reach the Nanoleaf device at {}.",
+                    self.ip
+                )));
+            };
+            let res_json: serde_json::Value = serde_json::from_str(&res)?;
+            let palette_json = res_json["palette"].as_array().unwrap();
+            let mut palette: Vec<Srgb<u8>> = Vec::new();
+            for color_json in palette_json.iter() {
+                let h = color_json["hue"].as_u64().unwrap() as f32;
+                let s = (color_json["saturation"].as_u64().unwrap() as f32) / 100.0;
+                let b = (color_json["brightness"].as_u64().unwrap() as f32) / 100.0;
+                palette.push(Srgb::from_color(Hsv::new_srgb(h, s, b)).into_format::<u8>());
+            }
+            palettes.push(palette);
+        }
+
+        Ok(res_list
+            .into_iter()
+            .zip(palettes)
+            .map(|x| Effect {
+                name: x.0,
+                colors: x.1,
+            })
+            .collect::<Vec<_>>())
     }
 
     pub fn play_effect(&self, effect_name: &str) -> Result<(), anyhow::Error> {
@@ -246,17 +286,6 @@ impl NanoleafDevice {
         };
         Ok(())
     }
-
-    // pub fn run_visualizer(&self) -> Result<(), anyhow::Error> {
-    //     Self::request_external_control(self)?;
-    //     // send Msg::Resume to the audio thread
-    //     Ok(())
-    // }
-    //
-    // pub fn pause_visualizer(&self) -> Result<(), anyhow::Error> {
-    //     // send Msg::Pause to the audio thread (there's a pausing function in cpal)
-    //     Ok(())
-    // }
 
     pub fn request_external_control(&self) -> Result<(), anyhow::Error> {
         let data = json!({
