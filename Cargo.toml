@@ -3,7 +3,7 @@ name = "audioleaf"
 version = "3.0.0"
 edition = "2021"
 authors = ["Antoni Zasada"]
-description = "Visualize music on your Nanoleaf Canvas"
+description = "Manage your Nanoleaf Canvas and visualize music straight from the terminal"
 keywords = ["nanoleaf", "audio", "music", "visualizer"]
 license = "MIT"
 readme = "README.md"
@@ -20,6 +20,7 @@ cpal = "0.15.3"
 dirs = "5.0.1"
 num-complex = "0.4.6"
 palette = "0.7.6"
+rand = "0.9.0"
 ratatui = "0.29.0"
 reqwest = { version = "0.12.7", features = ["blocking", "json"] }
 rustfft = "6.2.0"

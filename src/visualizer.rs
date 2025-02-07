@@ -14,6 +14,7 @@ pub enum VisualizerEvent {
     Pause,
     End,
     Resume,
+    GainDelta(f32),
 }
 
 #[derive(Debug, Default)]
@@ -78,16 +79,16 @@ pub fn setup_visualizer_thread(
     panels: Vec<Panel>,
     udp_socket: UdpSocket,
 ) -> Result<(thread::JoinHandle<impl Send>, mpsc::Sender<VisualizerEvent>), anyhow::Error> {
-    let (transition_time, min_freq, max_freq, boost) = (
+    let (transition_time, min_freq, max_freq, mut gain) = (
         visualizer_options.transition_time,
         visualizer_options.min_freq,
         visualizer_options.max_freq,
-        visualizer_options.default_boost,
+        visualizer_options.default_gain,
     );
     let mut colors = visualizer_options
         .hues
         .iter()
-        .map(|hue| palette::Hwb::new(*hue as f32, 1.0, 0.0))
+        .map(|hue| palette::Hwb::new(*hue as f32, 0.0, 1.0))
         .collect::<Vec<_>>();
     let active_panels_numbers = visualizer_options.active_panels_numbers.clone();
     let sample_rate = stream_config.sample_rate.0;
@@ -201,17 +202,23 @@ pub fn setup_visualizer_thread(
                 None,
             ),
             _ => {
-                // write to a log
+                let log_path = utils::get_default_cache_dir().unwrap();
+                let log_path = log_path.join(constants::DEFAULT_VISUALIZER_LOG_FILE);
+                if let Ok(mut file) = fs::File::create(&log_path) {
+                    writeln!(
+                        file,
+                        "Audio sample format '{}' not supported",
+                        sample_format
+                    )
+                    .unwrap_or_default();
+                }
                 return;
             }
         };
-        if stream.is_err() {
-            // write to a log
-            return;
-        }
         let stream = stream.unwrap();
         let _ = stream.play();
 
+        let mut rng = rand::rng();
         let (mut pause, mut end) = (true, false);
         loop {
             if let Ok(event) = rx_events.try_recv() {
@@ -221,6 +228,9 @@ pub fn setup_visualizer_thread(
                     }
                     VisualizerEvent::End => {
                         end = true;
+                    }
+                    VisualizerEvent::GainDelta(delta) => {
+                        gain += delta;
                     }
                     _ => (),
                 }
@@ -254,9 +264,9 @@ pub fn setup_visualizer_thread(
                     samples.append(&mut new_samples);
                 }
             }
-            let freq_spectrum = audio::process(samples, boost);
+            let freq_spectrum = audio::process(samples, gain);
             let hz_per_bin = (sample_rate / 2) / (freq_spectrum.len() as u32);
-            audio::update_colors(&mut colors, freq_spectrum, min_freq, max_freq, hz_per_bin);
+            audio::update_colors(&mut colors, freq_spectrum, min_freq, max_freq, hz_per_bin, &mut rng);
             let commands = active_panels_numbers
                 .iter()
                 .zip(colors.iter())

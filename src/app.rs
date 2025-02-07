@@ -1,3 +1,4 @@
+use crate::config::Config;
 use crate::nanoleaf::NanoleafDevice;
 use crate::utils;
 use crate::visualizer::VisualizerEvent;
@@ -14,10 +15,11 @@ use ratatui::{
     },
     Frame, Terminal,
 };
+use rustfft::num_traits::Signed;
 use std::sync::mpsc;
 use std::time::Duration;
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 enum AppMode {
     EffectsList,
     Visualizer,
@@ -33,6 +35,7 @@ pub struct App {
     list_state: ListState,
     scroll: usize,
     scroll_state: ScrollbarState,
+    gain: f32,
     show_help: bool,
     use_colors: bool,
     exit: bool,
@@ -42,7 +45,7 @@ impl App {
     pub fn new(
         nl: NanoleafDevice,
         tx: mpsc::Sender<VisualizerEvent>,
-        // config: Config,
+        config: &Config,
     ) -> Result<Self, anyhow::Error> {
         let list = nl.get_effect_list()?;
         let list_pos = if let Some(ref curr_effect) = nl.curr_effect {
@@ -58,13 +61,13 @@ impl App {
             tx,
             app_mode: AppMode::EffectsList,
             nl,
-            // config,
             list,
             list_state,
             scroll: 0,
             scroll_state: ScrollbarState::default(),
+            gain: config.visualizer_options.default_gain,
             show_help: false,
-            use_colors: true, // add an option to disable with a cli argument
+            use_colors: config.cli_options.use_colors,
             exit: false,
         })
     }
@@ -122,7 +125,7 @@ impl App {
             }
             AppMode::Visualizer => {
                 frame.render_widget(
-                    Paragraph::new("Visualizer mode ON, enjoy!")
+                    Paragraph::new(vec![Line::raw("Visualizer mode ON"), Line::raw(format!("Audio gain: {:.2}", self.gain))])
                         .block(
                             Block::new()
                                 .borders(Borders::ALL)
@@ -150,6 +153,8 @@ impl App {
                     Line::raw("* Down/Up or j/k - scroll down/up"),
                     Line::raw("* C-d/C-u - scroll down/up by 3 items"),
                     Line::raw("* g/G - go to the top/bottom of the list"),
+                    Line::raw("* -/+ - decrease/increase gain (in visualizer mode)"),
+                    Line::raw("* (note that this doesn't affect your music volume, only the visuals are amplified)"),
                     Line::raw("* Enter - play selected effect"),
                 ])
                 .block(Block::new().borders(Borders::ALL).title("Help")),
@@ -179,61 +184,75 @@ impl App {
     }
 
     fn handle_key_event(&mut self, key_event: KeyEvent) -> Result<(), anyhow::Error> {
-        match key_event.code {
-            KeyCode::Esc => self.exit(),
-            KeyCode::Enter => {
-                if let Some(selected) = self.list_state.selected() {
-                    let effect = self.list[selected].clone();
-                    self.play_effect(&effect.name)?;
+        match self.app_mode {
+            AppMode::EffectsList => match key_event.code {
+                KeyCode::Esc => self.exit(),
+                KeyCode::Enter => {
+                    if let Some(selected) = self.list_state.selected() {
+                        let effect = self.list[selected].clone();
+                        self.play_effect(&effect.name)?;
+                    }
+                    Ok(())
                 }
-                Ok(())
-            }
-            KeyCode::Down => {
-                self.scroll_by(1);
-                Ok(())
-            }
-            KeyCode::Up => {
-                self.scroll_by(-1);
-                Ok(())
-            }
-            KeyCode::Char(c) => match c {
-                // 'x' if key_event.modifiers.contains(KeyModifiers::ALT) => {
-                //     panic!("you asked for it");
-                // }
-                'Q' => self.exit(),
-                'V' => self.toggle_visualizer(),
-                // vim-like scrolling
-                'j' => {
+                KeyCode::Down => {
                     self.scroll_by(1);
                     Ok(())
                 }
-                'k' => {
+                KeyCode::Up => {
                     self.scroll_by(-1);
                     Ok(())
                 }
-                'd' if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.scroll_by(3);
-                    Ok(())
-                }
-                'u' if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                    self.scroll_by(-3);
-                    Ok(())
-                }
-                'g' => {
-                    self.scroll_to_start();
-                    Ok(())
-                }
-                'G' => {
-                    self.scroll_to_end();
-                    Ok(())
-                }
-                '?' => {
-                    self.toggle_help();
-                    Ok(())
-                }
+                KeyCode::Char(c) => match c {
+                    'Q' => self.exit(),
+                    'V' => self.toggle_visualizer(),
+                    // vim-like scrolling
+                    'j' => {
+                        self.scroll_by(1);
+                        Ok(())
+                    }
+                    'k' => {
+                        self.scroll_by(-1);
+                        Ok(())
+                    }
+                    'd' if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.scroll_by(3);
+                        Ok(())
+                    }
+                    'u' if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                        self.scroll_by(-3);
+                        Ok(())
+                    }
+                    'g' => {
+                        self.scroll_to_start();
+                        Ok(())
+                    }
+                    'G' => {
+                        self.scroll_to_end();
+                        Ok(())
+                    }
+                    '?' => {
+                        self.toggle_help();
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                },
                 _ => Ok(()),
             },
-            _ => Ok(()),
+            AppMode::Visualizer => match key_event.code {
+                KeyCode::Esc => self.exit(),
+                KeyCode::Char(c) => match c {
+                    'Q' => self.exit(),
+                    'V' => self.toggle_visualizer(),
+                    '-' | '_' => self.change_gain(-0.05),
+                    '+' | '=' => self.change_gain(0.05),
+                    '?' => {
+                        self.toggle_help();
+                        Ok(())
+                    }
+                    _ => Ok(()),
+                },
+                _ => Ok(()),
+            },
         }
     }
 
@@ -264,6 +283,14 @@ impl App {
     fn play_effect(&mut self, effect: &str) -> Result<(), anyhow::Error> {
         self.nl.play_effect(effect)?;
         self.nl.curr_effect = Some(effect.to_string());
+        Ok(())
+    }
+
+    fn change_gain(&mut self, delta: f32) -> Result<(), anyhow::Error> {
+        if (self.gain + delta).is_positive() {
+            self.tx.send(VisualizerEvent::GainDelta(delta))?;
+            self.gain += delta;
+        }
         Ok(())
     }
 

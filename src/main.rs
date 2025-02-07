@@ -117,7 +117,7 @@ fn main() -> Result<(), anyhow::Error> {
     let panels = nl.panels.clone();
     let udp_socket = nl.get_udp_socket(config.cli_options.port)?;
     let (visualizer_thread, tx) = visualizer::setup_visualizer_thread(
-        config.visualizer_options,
+        config.visualizer_options.clone(),
         device,
         sample_format,
         stream_config,
@@ -129,7 +129,7 @@ fn main() -> Result<(), anyhow::Error> {
     // and the user can access the backtrace
     panic::register_backtrace_panic_handler();
     let mut terminal = utils::init_tui()?;
-    let mut app = App::new(nl, tx)?; // later pass config.tui_options
+    let mut app = App::new(nl, tx, &config)?; // later pass config.tui_options
     app.run(&mut terminal)?;
     visualizer_thread.join().unwrap();
     utils::destroy_tui()?;

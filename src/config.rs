@@ -11,6 +11,7 @@ use std::path::{Path, PathBuf};
 pub struct CliOptions {
     pub ip: Ipv4Addr,
     pub port: u16,
+    pub use_colors: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -18,7 +19,7 @@ pub struct VisualizerOptions {
     pub audio_device: String,
     pub min_freq: u16,
     pub max_freq: u16,
-    pub default_boost: f32,
+    pub default_gain: f32,
     pub time_window: f32,
     pub transition_time: u16,
     pub primary_axis: Axis,
@@ -31,7 +32,6 @@ pub struct VisualizerOptions {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Config {
     pub cli_options: CliOptions,
-    // pub tui_options: TuiOptions,
     pub visualizer_options: VisualizerOptions,
 }
 
@@ -101,12 +101,12 @@ pub fn make_default_config(
         fs::create_dir(config_dir)?;
     }
 
-    let cli_options = CliOptions { ip, port };
+    let cli_options = CliOptions { ip, port, use_colors: true };
     let visualizer_options = VisualizerOptions {
         audio_device,
         min_freq: constants::DEFAULT_FREQ_RANGE.0,
         max_freq: constants::DEFAULT_FREQ_RANGE.1,
-        default_boost: constants::DEFAULT_BOOST,
+        default_gain: constants::DEFAULT_GAIN,
         transition_time: constants::DEFAULT_TRANSITION_TIME,
         time_window: constants::DEFAULT_TIME_WINDOW,
         primary_axis: Axis::default(),
