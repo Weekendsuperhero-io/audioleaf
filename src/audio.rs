@@ -87,7 +87,8 @@ pub fn update_colors(
     min_freq: u16,
     max_freq: u16,
     hz_per_bin: u32,
-    rng: &mut impl rand::Rng,
+    prev_max: &mut [f32],
+    derivative: &mut [f32],
 ) {
     let n_panels = colors.len();
     let (min_freq, max_freq) = (min_freq as f32, max_freq as f32);
@@ -97,25 +98,23 @@ pub fn update_colors(
         cutoff *= multiplier;
         intervals.push(cutoff.round().min(max_freq) as u32);
     }
-    let (n_bins, mut cur_interval, mut cur_max, mut prev_max) = (spectrum.len(), 0, 0.0, 0.0);
+    let (n_bins, mut cur_interval, mut cur_max) = (spectrum.len(), 0, 0.0_f32);
+    let rate_func_inc = |x: f32| -> f32 { 1.0 - (1.0 - x).powi(3) };
+    let rate_func_dec = |x: f32| -> f32 { 0.8 * (1.0 - (1.0 - x).powi(4)) };
+
     for (i, ampl) in spectrum.into_iter().enumerate() {
         let cur_freq = (i as u32) * hz_per_bin + hz_per_bin / 2;
         if cur_freq > intervals[cur_interval] || i == n_bins - 1 {
-            let cur_blackness = colors[cur_interval].blackness;
-            // let rate_func = |x: f32| -> f32 { 0.75 * (1.0 - (1.0 - x).powi(2)) };
-            let rate_func = |x: f32| -> f32 { 0.66 * (1.0 - (1.0 - x).powi(3)) };
-            if cur_max >= prev_max {
-                // louder -> subtract blackness
-                colors[cur_interval].blackness = (cur_blackness
-                    - rate_func((cur_max + cur_blackness - 1.0).clamp(0.0, 1.0)))
-                .max(0.0);
-            } else {
-                // quieter -> add blackness
-                colors[cur_interval].blackness = (cur_blackness
-                    + rate_func((1.0 - (cur_max + cur_blackness)).clamp(0.0, 1.0)))
-                .min(1.0);
+            let ampl_delta = cur_max - prev_max[cur_interval];
+            if ampl_delta > f32::EPSILON {
+                derivative[cur_interval] = -rate_func_inc(ampl_delta);
+            } else if ampl_delta < -f32::EPSILON {
+                derivative[cur_interval] = rate_func_dec(-ampl_delta);
             }
-            prev_max = cur_max;
+            colors[cur_interval].blackness =
+                (colors[cur_interval].blackness + derivative[cur_interval]).clamp(0.0, 1.0);
+
+            prev_max[cur_interval] = cur_max;
             cur_max = 0.0;
             cur_interval += 1;
         }

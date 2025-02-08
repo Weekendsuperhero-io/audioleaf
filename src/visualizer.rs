@@ -218,8 +218,9 @@ pub fn setup_visualizer_thread(
         let stream = stream.unwrap();
         let _ = stream.play();
 
-        let mut rng = rand::rng();
         let (mut pause, mut end) = (true, false);
+        let mut prev_max = vec![0.0; panels.len()];
+        let mut derivative = vec![0.0; panels.len()];
         loop {
             if let Ok(event) = rx_events.try_recv() {
                 match event {
@@ -266,7 +267,15 @@ pub fn setup_visualizer_thread(
             }
             let freq_spectrum = audio::process(samples, gain);
             let hz_per_bin = (sample_rate / 2) / (freq_spectrum.len() as u32);
-            audio::update_colors(&mut colors, freq_spectrum, min_freq, max_freq, hz_per_bin, &mut rng);
+            audio::update_colors(
+                &mut colors,
+                freq_spectrum,
+                min_freq,
+                max_freq,
+                hz_per_bin,
+                &mut prev_max,
+                &mut derivative,
+            );
             let commands = active_panels_numbers
                 .iter()
                 .zip(colors.iter())

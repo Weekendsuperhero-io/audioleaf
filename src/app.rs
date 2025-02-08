@@ -125,13 +125,16 @@ impl App {
             }
             AppMode::Visualizer => {
                 frame.render_widget(
-                    Paragraph::new(vec![Line::raw("Visualizer mode ON"), Line::raw(format!("Audio gain: {:.2}", self.gain))])
-                        .block(
-                            Block::new()
-                                .borders(Borders::ALL)
-                                .title_top(format!("{} Control Panel", self.nl.name)),
-                        )
-                        .centered(),
+                    Paragraph::new(vec![
+                        Line::raw("Visualizer mode ON"),
+                        Line::raw(format!("Amplitude gain: {:.2}", self.gain)),
+                    ])
+                    .block(
+                        Block::new()
+                            .borders(Borders::ALL)
+                            .title_top(format!("{} Control Panel", self.nl.name)),
+                    )
+                    .centered(),
                     layout[0],
                 );
             }

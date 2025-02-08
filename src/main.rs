@@ -112,7 +112,10 @@ fn main() -> Result<(), anyhow::Error> {
 
     let (device, sample_format, stream_config) =
         visualizer::setup_audio_device(&config.visualizer_options.audio_device)?;
-    println!("Using audio device \"{}\"", config.visualizer_options.audio_device);
+    println!(
+        "Using audio device \"{}\"",
+        config.visualizer_options.audio_device
+    );
     // config::validate(&config, ...)?; // for example check if hues are in 0..=360, max_freq is in range, ...
     let panels = nl.panels.clone();
     let udp_socket = nl.get_udp_socket(config.cli_options.port)?;

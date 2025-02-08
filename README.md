@@ -1,6 +1,6 @@
 # Audioleaf
 
-An audio visualizer for Nanoleaf Canvas
+A TUI for managing and visualizing music on your Nanoleaf Canvas
 
 ## Installation
 
@@ -18,7 +18,7 @@ All configuration of audioleaf is done through the `config.toml` file, located i
 * `min/max_freq`: The minimum/maximum frequency (in Hz) to be included in the visualization.
 * `default_gain`: A non-negative real number, the bigger it is the more the audio samples are amplified before being visualized. While in audioleaf you can decrease and increase gain with the <kbd>-</kbd> and <kbd>+</kbd> keys. This settings doesn't affect your listening volume.
 * `transition_time`: The time (in units of 100 ms) it will take for a panel to perform a full color change. 
-* `time_window`: The length of the time window that audioleaf will collect audio samples from. The longer it is, the smoother the visualization will be.
+* `time_window`: The length of the time window (in seconds) that audioleaf will collect audio samples from. A long time window can make the visualization look "jagged".
 * `primary_axis`: The primary coordinate by which the panels will be sorted. Possible values are `"x"` (left → right) and `"y"` (bottom → top).
 * `sort_primary/secondary`: The direction in which the panels will be sorted on the primary/secondary axis. Possible values are `"asc"` (ascending) and `"desc"` (descending).
 * `hues`: A list of hues to be used in the visualizer's color palette, specified as angles between 0 and 360 degrees on the standard [color wheel](https://developer.mozilla.org/en-US/blog/learn-css-hues-colors-hsl/color-wheel.svg).

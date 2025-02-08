@@ -101,7 +101,11 @@ pub fn make_default_config(
         fs::create_dir(config_dir)?;
     }
 
-    let cli_options = CliOptions { ip, port, use_colors: true };
+    let cli_options = CliOptions {
+        ip,
+        port,
+        use_colors: true,
+    };
     let visualizer_options = VisualizerOptions {
         audio_device,
         min_freq: constants::DEFAULT_FREQ_RANGE.0,
