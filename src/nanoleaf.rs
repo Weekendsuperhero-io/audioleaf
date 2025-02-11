@@ -1,165 +1,93 @@
-use crate::constants;
-use crate::utils;
-use palette::{hsv::Hsv, rgb::Srgb, FromColor};
+use crate::{
+    config::{Axis, Sort},
+    constants, utils,
+};
+use anyhow::{anyhow, Result};
+use palette::{FromColor, Hsv, Srgb};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use std::fs::{self, OpenOptions};
-use std::io::prelude::*;
-use std::net::{Ipv4Addr, SocketAddrV4, UdpSocket};
-use std::path::Path;
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Axis {
-    X,
-    #[default]
-    Y,
-}
-
-#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Sort {
-    #[default]
-    Asc,
-    Desc,
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct Panel {
-    pub id: u16,
-    x: i16,
-    y: i16,
-}
-
-#[derive(Clone, Debug)]
-pub struct Effect {
-    pub name: String,
-    pub colors: Vec<Srgb<u8>>,
-}
+use std::{
+    fs::{File, OpenOptions},
+    io::prelude::*,
+    net::{Ipv4Addr, SocketAddrV4, UdpSocket},
+    path::Path,
+};
 
 #[derive(Debug)]
-pub struct NanoleafDevice {
-    pub ip: Ipv4Addr,
+pub struct NlEffect {
     pub name: String,
-    pub curr_effect: Option<String>,
-    pub panels: Vec<Panel>,
-    token: String,
+    pub palette: Vec<Srgb<u8>>,
 }
 
-impl NanoleafDevice {
-    /// Create a new Nanoleaf device handle. If a device with this IP isn't present in the device file,
-    /// request its token add it there
-    pub fn new(ip: &Ipv4Addr, nl_device_file: &Path) -> Result<Self, anyhow::Error> {
-        let ip = ip.to_owned();
-        let token = match Self::find_token(&ip, nl_device_file)? {
-            Some(token) => token,
-            None => {
-                let token = Self::get_new_token(&ip)?;
-                Self::add_device_entry(&ip, &token, nl_device_file)?;
-                token
-            }
-        };
-        let name = Self::get_name(&ip, &token)?;
-        let curr_effect = Self::get_curr_effect(&ip, &token)?;
-        let panels = Self::get_panels(&ip, &token)?;
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NlDevice {
+    pub name: String,
+    pub ip: Ipv4Addr,
+    pub token: String,
+    #[serde(skip)]
+    #[serde(default)]
+    pub cur_effect_name: Option<String>,
+}
 
-        Ok(NanoleafDevice {
-            ip,
+/// wrapper struct for TOML serialization
+#[derive(Debug, Serialize, Deserialize)]
+struct NlDevices {
+    nl_devices: Vec<NlDevice>,
+}
+
+impl From<Vec<NlDevice>> for NlDevices {
+    fn from(nl_devices: Vec<NlDevice>) -> Self {
+        NlDevices { nl_devices }
+    }
+}
+
+impl NlDevice {
+    pub fn new(ip: Ipv4Addr) -> Result<Self> {
+        let token = Self::get_token(&ip)?;
+        let name = Self::get_name(&ip, &token)?;
+        let cur_effect_name = Self::get_cur_effect_name(&ip, &token)?;
+        Ok(NlDevice {
             name,
-            curr_effect,
-            panels,
+            ip,
             token,
+            cur_effect_name,
         })
     }
 
-    fn find_token(ip: &Ipv4Addr, nl_device_file: &Path) -> Result<Option<String>, anyhow::Error> {
-        if !Path::exists(nl_device_file) {
-            return Ok(None);
-        }
-        let nl_devices = fs::read_to_string(nl_device_file)?;
-        for device in nl_devices.lines() {
-            let split = device.split(';').collect::<Vec<_>>();
-            if split.len() != 2 {
-                return Err(anyhow::Error::msg(
-                    "Invalid nl_devices file, every line should look like {IP};{TOKEN}",
-                ));
-            }
-            if split[0] == ip.to_string() {
-                return Ok(Some(split[1].trim_end().to_string()));
-            }
-        }
-        Ok(None)
-    }
-
-    fn get_new_token(ip: &Ipv4Addr) -> Result<String, anyhow::Error> {
+    fn get_token(ip: &Ipv4Addr) -> Result<String> {
         let Ok(res) = utils::request_post(
             &format!("http://{}:{}/api/v1/new", ip, constants::NL_API_PORT),
             None,
         ) else {
-            return Err(anyhow::Error::msg(format!("Couldn't connect to the Nanoleaf device at {}, make sure that the control lights are flashing while you're trying to connect.", ip)));
+            return Err(anyhow!(utils::generate_connection_error_msg(ip)));
         };
         let res_json: serde_json::Value = serde_json::from_str(&res)?;
-        Ok(res_json["auth_token"]
-            .as_str()
-            .unwrap()
-            .trim_end()
-            .to_string())
+
+        Ok(res_json["auth_token"].as_str().unwrap().trim().to_string())
     }
 
-    fn add_device_entry(
-        ip: &Ipv4Addr,
-        token: &str,
-        nl_device_file: &Path,
-    ) -> Result<(), anyhow::Error> {
-        let nl_device_dir = match nl_device_file.parent() {
-            Some(parent) => parent,
-            None => {
-                return Err(anyhow::Error::msg(format!(
-                    "Path '{}' is invalid",
-                    nl_device_file.to_string_lossy()
-                )));
-            }
-        };
-        if !Path::try_exists(nl_device_dir)? {
-            fs::create_dir(nl_device_dir)?;
-        }
-        let mut nl_device_file_handle = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(nl_device_file)?;
-        nl_device_file_handle.write_all(format!("{};{}\n", ip, token).as_bytes())?;
-
-        Ok(())
-    }
-
-    fn get_name(ip: &Ipv4Addr, token: &str) -> Result<String, anyhow::Error> {
+    fn get_name(ip: &Ipv4Addr, token: &str) -> Result<String> {
         let Ok(res) = utils::request_get(&format!(
             "http://{}:{}/api/v1/{}",
             ip,
             constants::NL_API_PORT,
             token
         )) else {
-            return Err(anyhow::Error::msg(format!(
-                "Couldn't reach the Nanoleaf device at {}.",
-                ip
-            )));
+            return Err(anyhow!(utils::generate_connection_error_msg(ip)));
         };
         let res_json: serde_json::Value = serde_json::from_str(&res)?;
 
         Ok(String::from(res_json["name"].as_str().unwrap()))
     }
 
-    fn get_curr_effect(ip: &Ipv4Addr, token: &str) -> Result<Option<String>, anyhow::Error> {
+    pub fn get_cur_effect_name(ip: &Ipv4Addr, token: &str) -> Result<Option<String>> {
         let Ok(res) = utils::request_get(&format!(
             "http://{}:{}/api/v1/{}/effects/select",
             ip,
             constants::NL_API_PORT,
             token
         )) else {
-            return Err(anyhow::Error::msg(format!(
-                "Couldn't reach the Nanoleaf device at {}.",
-                ip
-            )));
+            return Err(anyhow!(utils::generate_connection_error_msg(ip)));
         };
         let res_text: String = serde_json::from_str(&res)?;
         if res_text == "*Solid*"
@@ -173,17 +101,14 @@ impl NanoleafDevice {
         }
     }
 
-    fn get_panels(ip: &Ipv4Addr, token: &str) -> Result<Vec<Panel>, anyhow::Error> {
+    pub fn get_panels(&self) -> Result<Vec<Panel>> {
         let Ok(res) = utils::request_get(&format!(
             "http://{}:{}/api/v1/{}/panelLayout/layout",
-            ip,
+            self.ip,
             constants::NL_API_PORT,
-            token
+            self.token
         )) else {
-            return Err(anyhow::Error::msg(format!(
-                "Couldn't reach the Nanoleaf device at {}.",
-                ip
-            )));
+            return Err(anyhow!(utils::generate_connection_error_msg(&self.ip)));
         };
         let res_json: serde_json::Value = serde_json::from_str(&res)?;
         let res_panels = res_json["positionData"].as_array().unwrap();
@@ -200,26 +125,14 @@ impl NanoleafDevice {
         Ok(panels)
     }
 
-    pub fn get_udp_socket(&self, port: u16) -> Result<UdpSocket, anyhow::Error> {
-        let socket_addr = SocketAddrV4::new(Ipv4Addr::new(0, 0, 0, 0), port);
-        let socket = UdpSocket::bind(socket_addr)?;
-        let nl_addr = SocketAddrV4::new(self.ip, constants::NL_UDP_PORT);
-        socket.connect(nl_addr)?;
-
-        Ok(socket)
-    }
-
-    pub fn get_effect_list(&self) -> Result<Vec<Effect>, anyhow::Error> {
+    pub fn get_effect_list(&self) -> Result<Vec<NlEffect>> {
         let Ok(res) = utils::request_get(&format!(
             "http://{}:{}/api/v1/{}/effects/effectsList",
             self.ip,
             constants::NL_API_PORT,
             self.token
         )) else {
-            return Err(anyhow::Error::msg(format!(
-                "Couldn't reach the Nanoleaf device at {}.",
-                self.ip
-            )));
+            return Err(anyhow!(utils::generate_connection_error_msg(&self.ip)));
         };
         let res_list: Vec<String> = serde_json::from_str(&res)?;
         let mut palettes = Vec::with_capacity(res_list.len());
@@ -239,10 +152,7 @@ impl NanoleafDevice {
                 ),
                 Some(&data),
             ) else {
-                return Err(anyhow::Error::msg(format!(
-                    "Couldn't reach the Nanoleaf device at {}.",
-                    self.ip
-                )));
+                return Err(anyhow!(utils::generate_connection_error_msg(&self.ip)));
             };
             let res_json: serde_json::Value = serde_json::from_str(&res)?;
             let palette_json = res_json["palette"].as_array().unwrap();
@@ -259,14 +169,14 @@ impl NanoleafDevice {
         Ok(res_list
             .into_iter()
             .zip(palettes)
-            .map(|x| Effect {
+            .map(|x| NlEffect {
                 name: x.0,
-                colors: x.1,
+                palette: x.1,
             })
             .collect::<Vec<_>>())
     }
 
-    pub fn play_effect(&self, effect_name: &str) -> Result<(), anyhow::Error> {
+    pub fn play_effect(&self, effect_name: &str) -> Result<()> {
         let data = json!({
             "select": effect_name
         });
@@ -279,15 +189,19 @@ impl NanoleafDevice {
             ),
             Some(&data),
         ) else {
-            return Err(anyhow::Error::msg(format!(
-                "Couldn't reach the Nanoleaf device at {}. Data: {}",
-                self.ip, data
-            )));
+            return Err(anyhow!(utils::generate_connection_error_msg(&self.ip)));
         };
         Ok(())
     }
 
-    pub fn request_external_control(&self) -> Result<(), anyhow::Error> {
+    pub fn get_udp_socket(&self) -> Result<UdpSocket> {
+        let socket = UdpSocket::bind("0.0.0.0:0")?;
+        socket.connect(SocketAddrV4::new(self.ip, constants::NL_UDP_PORT))?;
+
+        Ok(socket)
+    }
+
+    pub fn request_udp_control(&self) -> Result<()> {
         let data = json!({
             "write": {
                 "command": "display",
@@ -304,48 +218,133 @@ impl NanoleafDevice {
             ),
             Some(&data),
         ) else {
-            return Err(anyhow::Error::msg(format!(
-                "Couldn't reach the Nanoleaf device at {}. Data: {}",
-                self.ip, data
-            )));
+            return Err(anyhow!(utils::generate_connection_error_msg(&self.ip)));
         };
         Ok(())
     }
 
-    /// Sort the primary axis according to the primary sorting order,
-    /// and the secondary according to the secondary order
-    pub fn sort_panels(&mut self, primary_axis: Axis, primary_sort: Sort, secondary_sort: Sort) {
+    pub fn find_in_file(path: &Path, device_name: Option<&str>) -> Result<Self> {
+        let mut devices_file = File::open(path)?;
+        let mut contents = String::new();
+        devices_file.read_to_string(&mut contents)?;
+        let devices: NlDevices = toml::from_str(&contents)?;
+        let devices = devices.nl_devices;
+
+        if devices.is_empty() {
+            return Err(anyhow!(format!(
+                "Error: devices file {} is empty",
+                path.to_string_lossy()
+            )));
+        }
+        let Some(device_name) = device_name else {
+            return Ok(devices.into_iter().next().unwrap());
+        };
+        match devices
+            .into_iter()
+            .find(|device| device.name.as_str() == device_name)
+        {
+            Some(device) => Ok(device),
+            None => Err(anyhow!(format!(
+                "Error: Nanoleaf device `{}` not found",
+                device_name
+            ))),
+        }
+    }
+
+    pub fn append_to_file(&self, path: &Path) -> Result<()> {
+        let mut devices_file = OpenOptions::new().append(true).create(true).open(path)?;
+        let data: String = toml::to_string_pretty(self)?;
+        writeln!(devices_file, "[[nl_devices]]")?;
+        writeln!(devices_file, "{}", data)?;
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Panel {
+    pub id: u16,
+    pub x: i16,
+    pub y: i16,
+}
+
+#[derive(Debug)]
+pub struct NlUdp {
+    pub socket: UdpSocket,
+    pub panels: Vec<Panel>,
+}
+
+impl NlUdp {
+    pub fn new(nl_device: &NlDevice) -> Result<Self> {
+        Ok(NlUdp {
+            socket: nl_device.get_udp_socket()?,
+            panels: nl_device.get_panels()?,
+        })
+    }
+
+    pub fn sort_panels(
+        &mut self,
+        primary_axis: Option<Axis>,
+        primary_sort: Option<Sort>,
+        secondary_sort: Option<Sort>,
+    ) {
+        let primary_axis = primary_axis.unwrap_or_default();
+        let primary_sort = primary_sort.unwrap_or_default();
+        let secondary_sort = secondary_sort.unwrap_or_default();
         let sort_func = match primary_axis {
             Axis::X => match (primary_sort, secondary_sort) {
                 (Sort::Asc, Sort::Asc) => {
-                    |lhs: Panel, rhs: Panel| (lhs.x, lhs.y).cmp(&(rhs.x, rhs.y))
+                    |lhs: &Panel, rhs: &Panel| (lhs.x, lhs.y).cmp(&(rhs.x, rhs.y))
                 }
                 (Sort::Asc, Sort::Desc) => {
-                    |lhs: Panel, rhs: Panel| (lhs.x, -lhs.y).cmp(&(rhs.x, -rhs.y))
+                    |lhs: &Panel, rhs: &Panel| (lhs.x, -lhs.y).cmp(&(rhs.x, -rhs.y))
                 }
                 (Sort::Desc, Sort::Asc) => {
-                    |lhs: Panel, rhs: Panel| (-lhs.x, lhs.y).cmp(&(-rhs.x, rhs.y))
+                    |lhs: &Panel, rhs: &Panel| (-lhs.x, lhs.y).cmp(&(-rhs.x, rhs.y))
                 }
                 (Sort::Desc, Sort::Desc) => {
-                    |lhs: Panel, rhs: Panel| (-lhs.x, -lhs.y).cmp(&(-rhs.x, -rhs.y))
+                    |lhs: &Panel, rhs: &Panel| (-lhs.x, -lhs.y).cmp(&(-rhs.x, -rhs.y))
                 }
             },
             Axis::Y => match (primary_sort, secondary_sort) {
                 (Sort::Asc, Sort::Asc) => {
-                    |lhs: Panel, rhs: Panel| (lhs.y, lhs.x).cmp(&(rhs.y, rhs.x))
+                    |lhs: &Panel, rhs: &Panel| (lhs.y, lhs.x).cmp(&(rhs.y, rhs.x))
                 }
                 (Sort::Asc, Sort::Desc) => {
-                    |lhs: Panel, rhs: Panel| (lhs.y, -lhs.x).cmp(&(rhs.y, -rhs.x))
+                    |lhs: &Panel, rhs: &Panel| (lhs.y, -lhs.x).cmp(&(rhs.y, -rhs.x))
                 }
                 (Sort::Desc, Sort::Asc) => {
-                    |lhs: Panel, rhs: Panel| (-lhs.y, lhs.x).cmp(&(-rhs.y, rhs.x))
+                    |lhs: &Panel, rhs: &Panel| (-lhs.y, lhs.x).cmp(&(-rhs.y, rhs.x))
                 }
                 (Sort::Desc, Sort::Desc) => {
-                    |lhs: Panel, rhs: Panel| (-lhs.y, -lhs.x).cmp(&(-rhs.y, -rhs.x))
+                    |lhs: &Panel, rhs: &Panel| (-lhs.y, -lhs.x).cmp(&(-rhs.y, -rhs.x))
                 }
             },
         };
-        self.panels
-            .sort_by(|a: &Panel, b: &Panel| sort_func(*a, *b));
+        self.panels.sort_by(|a: &Panel, b: &Panel| sort_func(a, b));
+    }
+
+    pub fn update_panels(&self, colors: &[palette::Hwb], trans_time: u16) -> Result<()> {
+        let mut buf = vec![0; 8 * self.panels.len() + 2];
+        (buf[0], buf[1]) = utils::split_into_bytes(self.panels.len() as u16);
+        for (i, color) in colors.iter().enumerate() {
+            let Srgb {
+                red: r,
+                green: g,
+                blue: b,
+                ..
+            } = palette::Srgb::from_color(*color).into_format::<u8>();
+            let offset = 8 * i + 2;
+            (buf[offset], buf[offset + 1]) = utils::split_into_bytes(self.panels[i].id);
+            (
+                buf[offset + 2],
+                buf[offset + 3],
+                buf[offset + 4],
+                buf[offset + 5],
+            ) = (r, g, b, 0);
+            (buf[offset + 6], buf[offset + 7]) = utils::split_into_bytes(trans_time);
+        }
+        self.socket.send(&buf)?;
+
+        Ok(())
     }
 }

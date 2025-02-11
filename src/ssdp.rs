@@ -1,8 +1,9 @@
-use std::net::UdpSocket;
-use std::str;
-use std::sync::mpsc;
-use std::thread;
-use std::time::Duration;
+use anyhow::Result;
+use std::{
+    net::{Ipv4Addr, UdpSocket},
+    str,
+    time::{Duration, Instant},
+};
 
 const SSDP_MULTICAST_ADDR: &str = "239.255.255.250";
 const SSDP_MULTICAST_PORT: &str = "1900";
@@ -36,7 +37,7 @@ fn parse_name_and_ip(s: &str) -> Option<(String, String)> {
     }
 }
 
-pub fn ssdp_msearch(timeout: u64) -> Result<(), anyhow::Error> {
+pub fn ssdp_msearch() -> Result<(Vec<String>, Vec<Ipv4Addr>)> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.join_multicast_v4(&SSDP_MULTICAST_ADDR.parse()?, &"0.0.0.0".parse()?)?;
     socket.send_to(
@@ -48,26 +49,28 @@ pub fn ssdp_msearch(timeout: u64) -> Result<(), anyhow::Error> {
         format!("{SSDP_MULTICAST_ADDR}:{SSDP_MULTICAST_PORT}"),
     )?;
     socket.set_read_timeout(Some(Duration::from_secs(1)))?;
-
-    let (tx, rx) = mpsc::channel::<u8>();
-    println!("Listening for Nanoleaf devices, timing out in {} seconds.", timeout);
-    let listening_thread = thread::spawn(move || {
-        let mut buf = [0; 1 << 10];
-        loop {
-            if let Ok((size, _)) = socket.recv_from(&mut buf) {
-                let response = str::from_utf8(&buf[..size]).unwrap();
-                if let Some((name, ip)) = parse_name_and_ip(response) {
-                    println!("Discovered device {} with IP address {}", name, ip);
-                }
-            }
-            if rx.try_recv().is_ok() {
-                break;
+    let (mut ips, mut names) = (vec![], vec![]);
+    let mut buf = [0; 1 << 10];
+    let timeout = Duration::from_secs(10);
+    println!(
+        "Listening for Nanoleaf devices, timing out in {} seconds",
+        timeout.as_secs()
+    );
+    let timer = Instant::now();
+    loop {
+        if let Ok((size, _)) = socket.recv_from(&mut buf) {
+            let response = str::from_utf8(&buf[..size]).unwrap();
+            if let Some((name, ip)) = parse_name_and_ip(response) {
+                println!("Discovered device `{}` with IP address {}", name, ip);
+                names.push(name);
+                let ip = ip.parse::<Ipv4Addr>()?;
+                ips.push(ip);
             }
         }
-    });
-    thread::sleep(Duration::from_secs(timeout));
-    tx.send(1)?;
-    listening_thread.join().unwrap();
+        if timer.elapsed() >= timeout {
+            break;
+        }
+    }
 
-    Ok(())
+    Ok((names, ips))
 }

@@ -1,116 +1,325 @@
-use crate::config::Config;
-use crate::nanoleaf::NanoleafDevice;
+use crate::audio;
+use crate::constants;
+use crate::event_handler;
 use crate::utils;
-use crate::visualizer::VisualizerEvent;
-use crate::{constants, nanoleaf::Effect};
+use crate::visualizer::VisualizerMsg;
+use crate::{
+    config::{TuiConfig, VisualizerConfig},
+    nanoleaf::{NlDevice, NlEffect},
+    visualizer,
+};
+use anyhow::Result;
 use ratatui::{
-    crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers},
-    layout::{Constraint, Direction, Flex, Layout, Margin, Rect},
+    crossterm::event::{self, KeyCode},
+    layout::{Constraint, Direction, Layout, Margin},
     prelude::Backend,
     style::{Style, Stylize},
     text::Line,
     widgets::{
-        Block, Borders, Clear, HighlightSpacing, List, ListDirection, ListItem, ListState,
+        Block, Borders, HighlightSpacing, List, ListDirection, ListItem, ListState,
         Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
     },
     Frame, Terminal,
 };
-use rustfft::num_traits::Signed;
 use std::sync::mpsc;
-use std::time::Duration;
 
-#[derive(Debug, PartialEq, Eq)]
-enum AppMode {
-    EffectsList,
+#[derive(Debug, Default)]
+enum AppState {
+    #[default]
+    RunningEffectList,
+    RunningVisualizer,
+    Done,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum AppView {
+    #[default]
+    EffectList,
     Visualizer,
+    HelpScreen,
+}
+
+#[derive(Debug)]
+enum AppMsg {
+    NoOp,
+    Quit,
+    ChangeView(AppView),
+    PlayEffect(usize),
+    ScrollDown(u16),
+    ScrollUp(u16),
+    ScrollToBottom,
+    ScrollToTop,
+    ChangeGain(f32),
+}
+
+#[derive(Debug)]
+struct Scroll {
+    pos: u16,
+    state: ScrollbarState,
+}
+
+#[derive(Debug)]
+struct EffectList {
+    list: Vec<NlEffect>,
+    state: ListState,
+    scroll: Scroll,
+}
+
+#[derive(Debug)]
+struct Visualizer {
+    tx: mpsc::Sender<VisualizerMsg>,
+    gain: f32,
 }
 
 #[derive(Debug)]
 pub struct App {
-    app_mode: AppMode,
-    tx: mpsc::Sender<VisualizerEvent>,
-    nl: NanoleafDevice,
-    // config: Config,
-    list: Vec<Effect>,
-    list_state: ListState,
-    scroll: usize,
-    scroll_state: ScrollbarState,
-    gain: f32,
-    show_help: bool,
-    use_colors: bool,
-    exit: bool,
+    state: AppState,
+    prev_view: AppView,
+    view: AppView,
+    nl_device: NlDevice,
+    effect_list: EffectList,
+    visualizer: Visualizer,
+    display_colors: bool,
 }
 
 impl App {
     pub fn new(
-        nl: NanoleafDevice,
-        tx: mpsc::Sender<VisualizerEvent>,
-        config: &Config,
-    ) -> Result<Self, anyhow::Error> {
-        let list = nl.get_effect_list()?;
-        let list_pos = if let Some(ref curr_effect) = nl.curr_effect {
+        nl_device: NlDevice,
+        tui_config: TuiConfig,
+        visualizer_config: VisualizerConfig,
+    ) -> Result<Self> {
+        let state = AppState::default();
+        let prev_view = AppView::default();
+        let view = AppView::default();
+        let list = nl_device.get_effect_list()?;
+        let list_pos = if let Some(cur_effect_name) = nl_device.cur_effect_name.as_deref() {
             list.iter()
-                .position(|x| x.name == *curr_effect)
+                .position(|effect| effect.name == cur_effect_name)
                 .unwrap_or(0)
         } else {
             0
         };
-        let list_state = ListState::default().with_selected(Some(list_pos));
+        let scroll = Scroll {
+            pos: 0,
+            state: ScrollbarState::default(),
+        };
+        let effect_list = EffectList {
+            list,
+            state: ListState::default().with_selected(Some(list_pos)),
+            scroll,
+        };
+        let audio_stream = audio::AudioStream::new(visualizer_config.audio_backend.as_deref())?;
+        let gain = visualizer_config
+            .default_gain
+            .unwrap_or(constants::DEFAULT_GAIN);
+        let tx = visualizer::Visualizer::new(visualizer_config, audio_stream, &nl_device)?.init();
+        let visualizer = Visualizer { tx, gain };
+        let display_colors = tui_config
+            .colorful_effect_names
+            .unwrap_or(constants::DEFAULT_COLORFUL_EFFECT_NAMES);
 
         Ok(App {
-            tx,
-            app_mode: AppMode::EffectsList,
-            nl,
-            list,
-            list_state,
-            scroll: 0,
-            scroll_state: ScrollbarState::default(),
-            gain: config.visualizer_options.default_gain,
-            show_help: false,
-            use_colors: config.cli_options.use_colors,
-            exit: false,
+            state,
+            prev_view,
+            view,
+            nl_device,
+            effect_list,
+            visualizer,
+            display_colors,
         })
     }
 
-    pub fn run(&mut self, terminal: &mut Terminal<impl Backend>) -> Result<(), anyhow::Error> {
-        while !self.exit {
-            terminal.draw(|frame| self.draw(frame))?;
-            self.handle_events()?;
+    pub fn run(&mut self, terminal: &mut Terminal<impl Backend>) -> Result<()> {
+        let event_handler = event_handler::EventHandler::new();
+        loop {
+            terminal.draw(|frame| self.render_view(frame))?;
+            let event = event_handler.next()?;
+            let msg = self.event_to_msg(event);
+            self.update(msg)?;
+            if let AppState::Done = self.state {
+                break;
+            }
         }
+        self.visualizer.tx.send(VisualizerMsg::End)?;
         Ok(())
     }
 
-    fn draw(&mut self, frame: &mut Frame) {
+    fn event_to_msg(&self, key: event::KeyEvent) -> AppMsg {
+        match key.code {
+            KeyCode::Esc | KeyCode::Char('Q') => AppMsg::Quit,
+            KeyCode::Enter => {
+                if let AppView::EffectList = self.view {
+                    if let Some(selected) = self.effect_list.state.selected() {
+                        AppMsg::PlayEffect(selected)
+                    } else {
+                        AppMsg::NoOp
+                    }
+                } else {
+                    AppMsg::NoOp
+                }
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                if let AppView::EffectList = self.view {
+                    AppMsg::ScrollDown(1)
+                } else {
+                    AppMsg::NoOp
+                }
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                if let AppView::EffectList = self.view {
+                    AppMsg::ScrollUp(1)
+                } else {
+                    AppMsg::NoOp
+                }
+            }
+            KeyCode::Char('g') => AppMsg::ScrollToTop,
+            KeyCode::Char('G') => AppMsg::ScrollToBottom,
+            KeyCode::Char('V') => match self.view {
+                AppView::HelpScreen => AppMsg::NoOp,
+                AppView::EffectList => AppMsg::ChangeView(AppView::Visualizer),
+                AppView::Visualizer => AppMsg::ChangeView(AppView::EffectList),
+            },
+            KeyCode::Char('?') => {
+                if let AppView::HelpScreen = self.view {
+                    AppMsg::ChangeView(self.prev_view)
+                } else {
+                    AppMsg::ChangeView(AppView::HelpScreen)
+                }
+            }
+            KeyCode::Char('-') | KeyCode::Char('_') => {
+                if let AppView::Visualizer = self.view {
+                    AppMsg::ChangeGain(-0.05)
+                } else {
+                    AppMsg::NoOp
+                }
+            }
+            KeyCode::Char('=') | KeyCode::Char('+') => {
+                if let AppView::Visualizer = self.view {
+                    AppMsg::ChangeGain(0.05)
+                } else {
+                    AppMsg::NoOp
+                }
+            }
+            _ => AppMsg::NoOp,
+        }
+    }
+
+    fn update(&mut self, msg: AppMsg) -> Result<()> {
+        match msg {
+            AppMsg::NoOp => Ok(()),
+            AppMsg::Quit => {
+                self.state = AppState::Done;
+                Ok(())
+            }
+            AppMsg::ScrollDown(k) => {
+                self.effect_list.state.scroll_down_by(k);
+                self.effect_list.scroll.pos = self.effect_list.scroll.pos.saturating_add(k);
+                self.effect_list.scroll.state = self
+                    .effect_list
+                    .scroll
+                    .state
+                    .position(self.effect_list.scroll.pos as usize);
+                Ok(())
+            }
+            AppMsg::ScrollUp(k) => {
+                self.effect_list.state.scroll_up_by(k);
+                self.effect_list.scroll.pos = self.effect_list.scroll.pos.saturating_sub(k);
+                self.effect_list.scroll.state = self
+                    .effect_list
+                    .scroll
+                    .state
+                    .position(self.effect_list.scroll.pos as usize);
+                Ok(())
+            }
+            AppMsg::ScrollToBottom => {
+                self.effect_list.state.select_last();
+                self.effect_list.scroll.pos = self.effect_list.list.len() as u16 - 1;
+                self.effect_list.scroll.state = self
+                    .effect_list
+                    .scroll
+                    .state
+                    .position(self.effect_list.scroll.pos as usize);
+                Ok(())
+            }
+            AppMsg::ScrollToTop => {
+                self.effect_list.state.select_first();
+                self.effect_list.scroll.pos = 0;
+                self.effect_list.scroll.state = self
+                    .effect_list
+                    .scroll
+                    .state
+                    .position(self.effect_list.scroll.pos as usize);
+                Ok(())
+            }
+            AppMsg::ChangeView(view) => {
+                self.prev_view = self.view;
+                self.view = view;
+                match self.view {
+                    AppView::Visualizer => {
+                        if !matches!(self.state, AppState::RunningVisualizer) {
+                            self.nl_device.request_udp_control()?;
+                            self.visualizer.tx.send(VisualizerMsg::Resume)?;
+                        }
+                        self.state = AppState::RunningVisualizer;
+                    }
+                    AppView::EffectList => {
+                        if !matches!(self.state, AppState::RunningEffectList) {
+                            self.visualizer.tx.send(VisualizerMsg::Pause)?;
+                        }
+                        self.state = AppState::RunningEffectList;
+                    }
+                    AppView::HelpScreen => (),
+                };
+                Ok(())
+            }
+            AppMsg::PlayEffect(i) => {
+                let effect_name = self.effect_list.list[i].name.as_str();
+                self.nl_device.play_effect(effect_name)?;
+                Ok(())
+            }
+            AppMsg::ChangeGain(delta) => {
+                self.visualizer.gain += delta;
+                self.visualizer
+                    .tx
+                    .send(VisualizerMsg::SetGain(self.visualizer.gain))?;
+                Ok(())
+            }
+        }
+    }
+
+    fn render_view(&mut self, frame: &mut Frame) {
         let layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints(vec![Constraint::Percentage(90), Constraint::Percentage(10)])
             .split(frame.area());
-        match self.app_mode {
-            AppMode::EffectsList => {
+        let main_block = Block::new()
+            .borders(Borders::ALL)
+            .title_top(format!("Connected to {}", self.nl_device.name));
+        match self.view {
+            AppView::EffectList => {
                 frame.render_stateful_widget(
-                    List::new(self.list.iter().map(|x| {
+                    List::new(self.effect_list.list.iter().map(|x| {
                         let name = x.name.as_str();
-                        if self.use_colors {
-                            ListItem::new(utils::colorize_effect_name(name, &x.colors))
+                        if self.display_colors {
+                            ListItem::new(utils::colorful_effect_name(name, &x.palette))
                         } else {
                             ListItem::new(name)
                         }
                     }))
                     .scroll_padding(2)
-                    .block(
-                        Block::new()
-                            .borders(Borders::ALL)
-                            .title_top(format!("{} Control Panel", self.nl.name)),
-                    )
+                    .block(main_block)
                     .highlight_style(Style::new().bold())
                     .highlight_symbol(">> ")
                     .highlight_spacing(HighlightSpacing::Always)
                     .direction(ListDirection::TopToBottom),
                     layout[0],
-                    &mut self.list_state,
+                    &mut self.effect_list.state,
                 );
-
-                self.scroll_state = self.scroll_state.content_length(self.list.len());
+                self.effect_list.scroll.state = self
+                    .effect_list
+                    .scroll
+                    .state
+                    .content_length(self.effect_list.list.len());
                 frame.render_stateful_widget(
                     Scrollbar::new(ScrollbarOrientation::VerticalRight)
                         .track_symbol(Some("│"))
@@ -120,207 +329,46 @@ impl App {
                         vertical: 1,
                         horizontal: 0,
                     }),
-                    &mut self.scroll_state,
+                    &mut self.effect_list.scroll.state,
+                );
+                frame.render_widget(
+                    Paragraph::new("Press '?' for help").block(Block::new().borders(Borders::ALL)),
+                    layout[1],
                 );
             }
-            AppMode::Visualizer => {
+            AppView::Visualizer => {
                 frame.render_widget(
                     Paragraph::new(vec![
-                        Line::raw("Visualizer mode ON"),
-                        Line::raw(format!("Amplitude gain: {:.2}", self.gain)),
+                        Line::from("Music Visualizer".bold().cyan()),
+                        Line::from(vec!["Amplitude gain: ".into(), format!("{:.2}", self.visualizer.gain).blue()]),
                     ])
-                    .block(
-                        Block::new()
-                            .borders(Borders::ALL)
-                            .title_top(format!("{} Control Panel", self.nl.name)),
-                    )
+                    .block(main_block)
+                    .centered(),
+                    layout[0],
+                );
+                frame.render_widget(
+                    Paragraph::new("Press '?' for help").block(Block::new().borders(Borders::ALL)),
+                    layout[1],
+                );
+            }
+            AppView::HelpScreen => {
+                frame.render_widget(
+                    Paragraph::new(vec![
+                        Line::from("Keybinds:".bold()),
+                        Line::from(vec!["?".bold(), " - toggle help".into()]),
+                        Line::from(vec!["Q/Esc".bold(), " - quit".into()]),
+                        Line::from(vec!["g/G".bold(), " - go to the top/bottom of the list".into()]),
+                        Line::from(vec!["j/Down, k/Up".bold(), " - scroll down and up".into()]),
+                        Line::from(vec!["Enter".bold(), " - play selected effect".into()]),
+                        Line::from(vec!["V".bold(), " - toggle music visualizer mode".into()]),
+                        Line::from(vec!["-/+".bold(), " - decrease/increase gain (in visualizer mode)".into()]),
+                        Line::from(vec!["(note that this doesn't affect your music volume, only the visuals are amplified)".italic()]),
+                    ])
+                    .block(main_block)
                     .centered(),
                     layout[0],
                 );
             }
-        }
-        frame.render_widget(
-            Paragraph::new("Press '?' for help").block(Block::new().borders(Borders::ALL)),
-            layout[1],
-        );
-
-        if self.show_help {
-            let area = Self::popup_area(frame.area(), 90, 75);
-            frame.render_widget(Clear, area);
-            frame.render_widget(
-                Paragraph::new(vec![
-                    Line::raw("Controls:").bold(),
-                    Line::raw("* ? - toggle help"),
-                    Line::raw("* Q or Esc - quit"),
-                    Line::raw("* V - toggle music visualizer mode"),
-                    Line::raw("* Down/Up or j/k - scroll down/up"),
-                    Line::raw("* C-d/C-u - scroll down/up by 3 items"),
-                    Line::raw("* g/G - go to the top/bottom of the list"),
-                    Line::raw("* -/+ - decrease/increase gain (in visualizer mode)"),
-                    Line::raw("* (note that this doesn't affect your music volume, only the visuals are amplified)"),
-                    Line::raw("* Enter - play selected effect"),
-                ])
-                .block(Block::new().borders(Borders::ALL).title("Help")),
-                area,
-            );
-        }
-    }
-
-    fn popup_area(area: Rect, pc_x: u16, pc_y: u16) -> Rect {
-        let hori = Layout::horizontal([Constraint::Percentage(pc_x)]).flex(Flex::Center);
-        let vert = Layout::vertical([Constraint::Percentage(pc_y)]).flex(Flex::Center);
-        let [area] = vert.areas(area);
-        let [area] = hori.areas(area);
-        area
-    }
-
-    fn handle_events(&mut self) -> Result<(), anyhow::Error> {
-        if event::poll(Duration::from_millis(constants::TICKRATE))? {
-            match event::read()? {
-                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
-                    self.handle_key_event(key_event)?
-                }
-                _ => {}
-            };
-        }
-        Ok(())
-    }
-
-    fn handle_key_event(&mut self, key_event: KeyEvent) -> Result<(), anyhow::Error> {
-        match self.app_mode {
-            AppMode::EffectsList => match key_event.code {
-                KeyCode::Esc => self.exit(),
-                KeyCode::Enter => {
-                    if let Some(selected) = self.list_state.selected() {
-                        let effect = self.list[selected].clone();
-                        self.play_effect(&effect.name)?;
-                    }
-                    Ok(())
-                }
-                KeyCode::Down => {
-                    self.scroll_by(1);
-                    Ok(())
-                }
-                KeyCode::Up => {
-                    self.scroll_by(-1);
-                    Ok(())
-                }
-                KeyCode::Char(c) => match c {
-                    'Q' => self.exit(),
-                    'V' => self.toggle_visualizer(),
-                    // vim-like scrolling
-                    'j' => {
-                        self.scroll_by(1);
-                        Ok(())
-                    }
-                    'k' => {
-                        self.scroll_by(-1);
-                        Ok(())
-                    }
-                    'd' if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.scroll_by(3);
-                        Ok(())
-                    }
-                    'u' if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                        self.scroll_by(-3);
-                        Ok(())
-                    }
-                    'g' => {
-                        self.scroll_to_start();
-                        Ok(())
-                    }
-                    'G' => {
-                        self.scroll_to_end();
-                        Ok(())
-                    }
-                    '?' => {
-                        self.toggle_help();
-                        Ok(())
-                    }
-                    _ => Ok(()),
-                },
-                _ => Ok(()),
-            },
-            AppMode::Visualizer => match key_event.code {
-                KeyCode::Esc => self.exit(),
-                KeyCode::Char(c) => match c {
-                    'Q' => self.exit(),
-                    'V' => self.toggle_visualizer(),
-                    '-' | '_' => self.change_gain(-0.05),
-                    '+' | '=' => self.change_gain(0.05),
-                    '?' => {
-                        self.toggle_help();
-                        Ok(())
-                    }
-                    _ => Ok(()),
-                },
-                _ => Ok(()),
-            },
-        }
-    }
-
-    fn exit(&mut self) -> Result<(), anyhow::Error> {
-        self.tx.send(VisualizerEvent::End)?;
-        self.exit = true;
-        Ok(())
-    }
-
-    fn toggle_visualizer(&mut self) -> Result<(), anyhow::Error> {
-        match self.app_mode {
-            AppMode::EffectsList => {
-                self.nl.request_external_control()?;
-                self.tx.send(VisualizerEvent::Resume)?;
-                self.app_mode = AppMode::Visualizer;
-            }
-            AppMode::Visualizer => {
-                self.tx.send(VisualizerEvent::Pause)?;
-                if let Some(effect) = self.nl.curr_effect.clone() {
-                    Self::play_effect(self, &effect)?;
-                }
-                self.app_mode = AppMode::EffectsList;
-            }
-        }
-        Ok(())
-    }
-
-    fn play_effect(&mut self, effect: &str) -> Result<(), anyhow::Error> {
-        self.nl.play_effect(effect)?;
-        self.nl.curr_effect = Some(effect.to_string());
-        Ok(())
-    }
-
-    fn change_gain(&mut self, delta: f32) -> Result<(), anyhow::Error> {
-        if (self.gain + delta).is_positive() {
-            self.tx.send(VisualizerEvent::GainDelta(delta))?;
-            self.gain += delta;
-        }
-        Ok(())
-    }
-
-    fn scroll_by(&mut self, k: i16) {
-        if k < 0 {
-            self.list_state.scroll_up_by(k.unsigned_abs());
-            self.scroll = self.scroll.saturating_sub(k.unsigned_abs() as usize);
-        } else {
-            self.list_state.scroll_down_by(k as u16);
-            self.scroll = self.scroll.saturating_add(k as usize);
-        }
-        self.scroll_state = self.scroll_state.position(self.scroll);
-    }
-
-    fn scroll_to_start(&mut self) {
-        self.list_state.select_first();
-        self.scroll = 0;
-        self.scroll_state = self.scroll_state.position(self.scroll);
-    }
-
-    fn scroll_to_end(&mut self) {
-        self.list_state.select_last();
-        self.scroll = self.list.len() - 1;
-        self.scroll_state = self.scroll_state.position(self.scroll);
-    }
-
-    fn toggle_help(&mut self) {
-        self.show_help = !self.show_help;
+        };
     }
 }

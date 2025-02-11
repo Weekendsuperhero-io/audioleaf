@@ -1,6 +1,6 @@
 [package]
 name = "audioleaf"
-version = "3.0.0"
+version = "3.1.0"
 edition = "2021"
 authors = ["Antoni Zasada"]
 description = "Manage your Nanoleaf Canvas and visualize music straight from the terminal"
@@ -15,18 +15,16 @@ repository = "https://github.com/alfazet/audioleaf"
 anyhow = "1.0.86"
 clap = { version = "4.5.16", features = ["derive"] }
 cli-log = "2.1.0"
-console = "0.15.8"
 cpal = "0.15.3"
+dasp_sample = "0.11.0"
 dirs = "5.0.1"
 num-complex = "0.4.6"
 palette = "0.7.6"
 ratatui = "0.29.0"
 reqwest = { version = "0.12.7", features = ["blocking", "json"] }
-rustfft = "6.2.0"
 serde = { version = "1.0.209", features = ["derive"] }
 serde_json = "1.0.127"
 toml = "0.8.19"
-url = "2.5.2"
 
 [profile.release]
 panic = "abort"

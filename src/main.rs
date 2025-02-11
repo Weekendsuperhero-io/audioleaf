@@ -1,140 +1,63 @@
-use crate::app::App;
-use crate::nanoleaf::NanoleafDevice;
+use anyhow::Result;
 use clap::Parser;
-use cli_log::*;
-use std::net::Ipv4Addr;
-use std::path::PathBuf;
 
 mod app;
 mod audio;
 mod config;
 mod constants;
+mod event_handler;
 mod nanoleaf;
 mod panic;
+mod processing;
 mod ssdp;
 mod utils;
 mod visualizer;
 
-#[derive(Parser, Debug)]
-#[command(version, about, author, long_about = None)]
-struct CmdOptions {
-    /// If passed, audioleaf will only try to discover Nanoleaf devices
-    /// present on the local network (SSDP must be enabled).
-    /// The value specifies the time (in seconds) before audioleaf will give up the search.
-    #[arg(long, require_equals = true, num_args = 0..=1, default_value = "0", default_missing_value = "10")]
-    ssdp: u64,
-
-    /// Local IP address of the Nanoleaf device
-    #[arg(long)]
-    ip: Option<Ipv4Addr>,
-
-    /// Audioleaf's configuration file
-    #[arg(short, long)]
-    config_file: Option<PathBuf>,
-
-    /// File containing the IP, port, and auth token of the Nanoleaf device
-    #[arg(short, long)]
-    nl_device_file: Option<PathBuf>,
-
-    /// Port of the UDP socket through which data will be sent to the panels
-    #[arg(short, long)]
-    port: Option<u16>,
-
-    /// Audio device to use as the source of data for the visualizer.
-    /// Use "none" if you don't wish to use this feature.
-    #[arg(short, long)]
-    audio_device: Option<String>,
-}
-
-fn main() -> Result<(), anyhow::Error> {
-    init_cli_log!();
-    let CmdOptions {
-        ssdp,
-        ip,
-        config_file,
-        nl_device_file,
-        port,
-        audio_device,
-    } = CmdOptions::parse();
-    if ssdp > 0 {
-        ssdp::ssdp_msearch(ssdp)?;
-        return Ok(());
-    }
-    let (nl_device_file, nl_device_file_exists) = config::resolve_nl_device_file(nl_device_file)?;
-    let (config_file, config_file_exists) = config::resolve_config_file(config_file)?;
-    let (mut nl, config) = if config_file_exists {
-        let mut config = config::get_config_from_file(&config_file)?;
-        println!("Config file {} found", config_file.to_string_lossy());
-        if let Some(ip) = ip {
-            config.cli_options.ip = ip;
-        }
-        if let Some(port) = port {
-            config.cli_options.port = port;
-        }
-        if let Some(audio_device) = audio_device {
-            config.visualizer_options.audio_device = audio_device;
-        }
-        let nl = NanoleafDevice::new(&config.cli_options.ip, &nl_device_file)?;
-        (nl, config)
-    } else {
-        println!("No config file found");
-        let ip = if let Some(ip) = ip {
-            ip
-        } else {
-            if !nl_device_file_exists {
-                return Err(anyhow::Error::msg(format!("You don't have any Nanoleaf devices saved in your connection history ({} file).\n\
-                            Here's what to do:\n\
-                        -\tFind the IP address of your Nanoleaf device (which you can do by, for example, running `audioleaf --ssdp`)\n\
-                        -\tRun `audioleaf --ip <IP>` while your device is in \"pairing mode\". (You can enable this mode by\n\
-                        \tpressing and holding down the power button for ~5s - once the control lights start flashing\n\
-                        \tcyclically that means paring mode is on. \"Pairing mode\" will turn off automatically after some time.)\n\
-                        For more details refer to the README.", nl_device_file.to_string_lossy())));
-            }
-            config::get_first_ip(&nl_device_file)?
-        };
-        let audio_device = audio_device.unwrap_or(constants::DEFAULT_AUDIO_DEVICE.to_string());
-        let port = port.unwrap_or(constants::DEFAULT_HOST_UDP_PORT);
-        let nl = NanoleafDevice::new(&ip, &nl_device_file)?;
-        let config =
-            config::make_default_config(&config_file, audio_device, port, nl.panels.len(), nl.ip)?;
-        println!(
-            "Default configuration saved to {}",
-            config_file.to_string_lossy()
-        );
-        (nl, config)
-    };
-    println!("Connected to {}", nl.name);
-    nl.sort_panels(
-        config.visualizer_options.primary_axis,
-        config.visualizer_options.sort_primary,
-        config.visualizer_options.sort_secondary,
-    );
-
-    let (device, sample_format, stream_config) =
-        visualizer::setup_audio_device(&config.visualizer_options.audio_device)?;
-    println!(
-        "Using audio device \"{}\"",
-        config.visualizer_options.audio_device
-    );
-    // config::validate(&config, ...)?; // for example check if hues are in 0..=360, max_freq is in range, ...
-    let panels = nl.panels.clone();
-    let udp_socket = nl.get_udp_socket(config.cli_options.port)?;
-    let (visualizer_thread, tx) = visualizer::setup_visualizer_thread(
-        config.visualizer_options.clone(),
-        device,
-        sample_format,
-        stream_config,
-        panels,
-        udp_socket,
-    )?;
-
-    // install a custom panic hook so that the terminal doesn't get messed up
-    // and the user can access the backtrace
+fn main() -> Result<()> {
     panic::register_backtrace_panic_handler();
+    let config::CliOptions {
+        config_file_path,
+        devices_file_path,
+        device_name,
+        add_new,
+    } = config::CliOptions::parse();
+    let ((config_file_path, config_file_exists), (devices_file_path, devices_file_exists)) =
+        config::resolve_paths(config_file_path, devices_file_path)?;
+    let (nl_device, tui_config, visualizer_config) = if !add_new && devices_file_exists {
+        if config_file_exists {
+            let config = config::Config::parse_from_file(&config_file_path)?;
+            let name_to_search = if device_name.is_some() {
+                &device_name
+            } else {
+                &config.default_nl_device_name
+            };
+            let nl_device =
+                nanoleaf::NlDevice::find_in_file(&devices_file_path, name_to_search.as_deref())?;
+            (nl_device, config.tui_config, config.visualizer_config)
+        } else {
+            let nl_device =
+                nanoleaf::NlDevice::find_in_file(&devices_file_path, device_name.as_deref())?;
+            let config = config::Config::new(Some(nl_device.name.clone()), None, None);
+            config.write_to_file(&config_file_path)?;
+            (nl_device, config.tui_config, config.visualizer_config)
+        }
+    } else {
+        let ip = config::get_ip_from_stdin()?;
+        let nl_device = nanoleaf::NlDevice::new(ip)?;
+        nl_device.append_to_file(&devices_file_path)?;
+        let config = if config_file_exists {
+            let mut config = config::Config::parse_from_file(&config_file_path)?;
+            config.default_nl_device_name = Some(nl_device.name.clone());
+            config
+        } else {
+            config::Config::new(Some(nl_device.name.clone()), None, None)
+        };
+        config.write_to_file(&config_file_path)?;
+        (nl_device, config.tui_config, config.visualizer_config)
+    };
+    let mut app = app::App::new(nl_device, tui_config, visualizer_config)?;
     let mut terminal = utils::init_tui()?;
-    let mut app = App::new(nl, tx, &config)?; // later pass config.tui_options
     app.run(&mut terminal)?;
-    visualizer_thread.join().unwrap();
     utils::destroy_tui()?;
     Ok(())
 }
