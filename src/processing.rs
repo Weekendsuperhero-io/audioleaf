@@ -63,16 +63,16 @@ pub fn update_colors(
     }
     let (n_bins, mut cur_interval, mut cur_max) = (spectrum.len(), 0, 0.0_f32);
     let rate_func_inc = |x: f32| -> f32 { 1.0 - (1.0 - x).powi(3) };
-    let rate_func_dec = |x: f32| -> f32 { 0.8 * (1.0 - (1.0 - x).powi(4)) };
+    let rate_func_dec = |x: f32| -> f32 { 0.9 * (1.0 - (1.0 - x).powi(4)) };
 
     for (i, ampl) in spectrum.into_iter().enumerate() {
         let cur_freq = (i as u32) * hz_per_bin + hz_per_bin / 2;
         if cur_freq > intervals[cur_interval] || i == n_bins - 1 {
             let ampl_delta = cur_max - prev_max[cur_interval];
-            if ampl_delta > f32::EPSILON {
+            if ampl_delta.is_sign_positive() {
                 speed[cur_interval] = -rate_func_inc(ampl_delta);
-            } else if ampl_delta < -f32::EPSILON {
-                speed[cur_interval] = rate_func_dec(-ampl_delta);
+            } else {
+                speed[cur_interval] = rate_func_dec(-ampl_delta).max(1e-4);
             }
             colors[cur_interval].blackness =
                 (colors[cur_interval].blackness + speed[cur_interval]).clamp(0.0, 1.0);

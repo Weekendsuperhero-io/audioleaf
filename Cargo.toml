@@ -1,6 +1,6 @@
 [package]
 name = "audioleaf"
-version = "3.1.0"
+version = "3.1.1"
 edition = "2021"
 authors = ["Antoni Zasada"]
 description = "Manage your Nanoleaf Canvas and visualize music straight from the terminal"
@@ -14,7 +14,6 @@ repository = "https://github.com/alfazet/audioleaf"
 [dependencies]
 anyhow = "1.0.86"
 clap = { version = "4.5.16", features = ["derive"] }
-cli-log = "2.1.0"
 cpal = "0.15.3"
 dasp_sample = "0.11.0"
 dirs = "5.0.1"
