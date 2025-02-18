@@ -1,6 +1,6 @@
 use crate::audio;
 use crate::constants;
-use crate::event_handler;
+use crate::event_handler::{self, Event};
 use crate::utils;
 use crate::visualizer::VisualizerMsg;
 use crate::{
@@ -10,14 +10,14 @@ use crate::{
 };
 use anyhow::Result;
 use ratatui::{
-    crossterm::event::{self, KeyCode},
-    layout::{Constraint, Direction, Layout, Margin},
+    crossterm::event::KeyCode,
+    layout::Margin,
     prelude::Backend,
     style::{Style, Stylize},
     text::Line,
     widgets::{
-        Block, Borders, HighlightSpacing, List, ListDirection, ListItem, ListState,
-        Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState,
+        Block, Borders, HighlightSpacing, List, ListDirection, ListItem, ListState, Paragraph,
+        Scrollbar, ScrollbarOrientation, ScrollbarState,
     },
     Frame, Terminal,
 };
@@ -144,63 +144,66 @@ impl App {
         Ok(())
     }
 
-    fn event_to_msg(&self, key: event::KeyEvent) -> AppMsg {
-        match key.code {
-            KeyCode::Esc | KeyCode::Char('Q') => AppMsg::Quit,
-            KeyCode::Enter => {
-                if let AppView::EffectList = self.view {
-                    if let Some(selected) = self.effect_list.state.selected() {
-                        AppMsg::PlayEffect(selected)
+    fn event_to_msg(&self, event: Event) -> AppMsg {
+        match event {
+            Event::Tick => AppMsg::NoOp,
+            Event::Key(e) => match e.code {
+                KeyCode::Esc | KeyCode::Char('Q') => AppMsg::Quit,
+                KeyCode::Enter => {
+                    if let AppView::EffectList = self.view {
+                        if let Some(selected) = self.effect_list.state.selected() {
+                            AppMsg::PlayEffect(selected)
+                        } else {
+                            AppMsg::NoOp
+                        }
                     } else {
                         AppMsg::NoOp
                     }
-                } else {
-                    AppMsg::NoOp
                 }
-            }
-            KeyCode::Down | KeyCode::Char('j') => {
-                if let AppView::EffectList = self.view {
-                    AppMsg::ScrollDown(1)
-                } else {
-                    AppMsg::NoOp
+                KeyCode::Down | KeyCode::Char('j') => {
+                    if let AppView::EffectList = self.view {
+                        AppMsg::ScrollDown(1)
+                    } else {
+                        AppMsg::NoOp
+                    }
                 }
-            }
-            KeyCode::Up | KeyCode::Char('k') => {
-                if let AppView::EffectList = self.view {
-                    AppMsg::ScrollUp(1)
-                } else {
-                    AppMsg::NoOp
+                KeyCode::Up | KeyCode::Char('k') => {
+                    if let AppView::EffectList = self.view {
+                        AppMsg::ScrollUp(1)
+                    } else {
+                        AppMsg::NoOp
+                    }
                 }
-            }
-            KeyCode::Char('g') => AppMsg::ScrollToTop,
-            KeyCode::Char('G') => AppMsg::ScrollToBottom,
-            KeyCode::Char('V') => match self.view {
-                AppView::HelpScreen => AppMsg::NoOp,
-                AppView::EffectList => AppMsg::ChangeView(AppView::Visualizer),
-                AppView::Visualizer => AppMsg::ChangeView(AppView::EffectList),
+                KeyCode::Char('g') => AppMsg::ScrollToTop,
+                KeyCode::Char('G') => AppMsg::ScrollToBottom,
+                KeyCode::Char('V') => match self.view {
+                    AppView::HelpScreen => AppMsg::NoOp,
+                    AppView::EffectList => AppMsg::ChangeView(AppView::Visualizer),
+                    AppView::Visualizer => AppMsg::ChangeView(AppView::EffectList),
+                },
+                KeyCode::Char('?') => {
+                    if let AppView::HelpScreen = self.view {
+                        AppMsg::ChangeView(self.prev_view)
+                    } else {
+                        AppMsg::ChangeView(AppView::HelpScreen)
+                    }
+                }
+                KeyCode::Char('-') | KeyCode::Char('_') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ChangeGain(-0.05)
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('=') | KeyCode::Char('+') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ChangeGain(0.05)
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                _ => AppMsg::NoOp,
             },
-            KeyCode::Char('?') => {
-                if let AppView::HelpScreen = self.view {
-                    AppMsg::ChangeView(self.prev_view)
-                } else {
-                    AppMsg::ChangeView(AppView::HelpScreen)
-                }
-            }
-            KeyCode::Char('-') | KeyCode::Char('_') => {
-                if let AppView::Visualizer = self.view {
-                    AppMsg::ChangeGain(-0.05)
-                } else {
-                    AppMsg::NoOp
-                }
-            }
-            KeyCode::Char('=') | KeyCode::Char('+') => {
-                if let AppView::Visualizer = self.view {
-                    AppMsg::ChangeGain(0.05)
-                } else {
-                    AppMsg::NoOp
-                }
-            }
-            _ => AppMsg::NoOp,
         }
     }
 
@@ -288,13 +291,18 @@ impl App {
     }
 
     fn render_view(&mut self, frame: &mut Frame) {
-        let layout = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints(vec![Constraint::Percentage(90), Constraint::Percentage(10)])
-            .split(frame.area());
         let main_block = Block::new()
             .borders(Borders::ALL)
-            .title_top(format!("Connected to {}", self.nl_device.name));
+            .title_top(
+                Line::from(vec![
+                    "Connected to ".into(),
+                    self.nl_device.name.as_str().magenta(),
+                ])
+                .left_aligned(),
+            )
+            .title_top(
+                Line::from(vec!["Press ".into(), "?".magenta(), " for help".into()]).right_aligned(),
+            );
         match self.view {
             AppView::EffectList => {
                 frame.render_stateful_widget(
@@ -312,7 +320,7 @@ impl App {
                     .highlight_symbol(">> ")
                     .highlight_spacing(HighlightSpacing::Always)
                     .direction(ListDirection::TopToBottom),
-                    layout[0],
+                    frame.area(),
                     &mut self.effect_list.state,
                 );
                 self.effect_list.scroll.state = self
@@ -325,30 +333,25 @@ impl App {
                         .track_symbol(Some("│"))
                         .begin_symbol(Some("↑"))
                         .end_symbol(Some("↓")),
-                    layout[0].inner(Margin {
+                    frame.area().inner(Margin {
                         vertical: 1,
                         horizontal: 0,
                     }),
                     &mut self.effect_list.scroll.state,
-                );
-                frame.render_widget(
-                    Paragraph::new("Press '?' for help").block(Block::new().borders(Borders::ALL)),
-                    layout[1],
                 );
             }
             AppView::Visualizer => {
                 frame.render_widget(
                     Paragraph::new(vec![
                         Line::from("Music Visualizer".bold().cyan()),
-                        Line::from(vec!["Amplitude gain: ".into(), format!("{:.2}", self.visualizer.gain).blue()]),
+                        Line::from(vec![
+                            "Amplitude gain: ".into(),
+                            format!("{:.2}", self.visualizer.gain).blue(),
+                        ]),
                     ])
                     .block(main_block)
                     .centered(),
-                    layout[0],
-                );
-                frame.render_widget(
-                    Paragraph::new("Press '?' for help").block(Block::new().borders(Borders::ALL)),
-                    layout[1],
+                    frame.area(),
                 );
             }
             AppView::HelpScreen => {
@@ -366,7 +369,7 @@ impl App {
                     ])
                     .block(main_block)
                     .centered(),
-                    layout[0],
+                    frame.area(),
                 );
             }
         };

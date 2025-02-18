@@ -3,8 +3,13 @@ use anyhow::Result;
 use ratatui::crossterm::event;
 use std::{sync::mpsc, thread, time::Duration};
 
+pub enum Event {
+    Key(event::KeyEvent),
+    Tick,
+}
+
 pub struct EventHandler {
-    rx: mpsc::Receiver<event::KeyEvent>,
+    rx: mpsc::Receiver<Event>,
 }
 
 impl EventHandler {
@@ -16,19 +21,20 @@ impl EventHandler {
             loop {
                 if event::poll(tickrate).expect("event poll failed") {
                     let event = event::read().expect("event read failed");
-                    if let event::Event::Key(key) = event {
-                        if key.kind == event::KeyEventKind::Press {
-                            tx.send(key).expect("event send failed");
+                    if let event::Event::Key(key_event) = event {
+                        if key_event.kind == event::KeyEventKind::Press {
+                            tx.send(Event::Key(key_event)).expect("event send failed");
                         }
                     }
                 }
+                tx.send(Event::Tick).expect("tick send failed");
             }
         });
 
         EventHandler { rx }
     }
 
-    pub fn next(&self) -> Result<event::KeyEvent> {
+    pub fn next(&self) -> Result<Event> {
         Ok(self.rx.recv()?)
     }
 }

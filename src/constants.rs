@@ -16,4 +16,4 @@ pub const DEFAULT_DEVICES_FILE: &str = "nl_devices.toml";
 pub const DEFAULT_BACKTRACE_FILE: &str = "audioleaf_backtrace.log";
 pub const NL_API_PORT: u16 = 16021;
 pub const NL_UDP_PORT: u16 = 60222;
-pub const TICKRATE: u64 = 16;
+pub const TICKRATE: u64 = 32;

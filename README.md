@@ -2,6 +2,8 @@
 
 A TUI for managing and visualizing music on your Nanoleaf Canvas
 
+![audioleaf tui view](https://github.com/alfazet/audioleaf/blob/main/images/tui.png)
+
 ## Installation
 
 Install from cargo with `cargo install audioleaf`. Make sure that the directory with cargo binaries (by default `$HOME/.cargo/bin`) is added to your `$PATH`.
@@ -33,12 +35,14 @@ All configuration of audioleaf is done through the `config.toml` file, located i
 
 ## Troubleshooting
 
-Make sure that audioleaf's audio input is set to be your media player's output. On Linux this can be done with any audio mixer software, for example [pavucontrol](https://freedesktop.org/software/pulseaudio/pavucontrol) (for pulseaudio or pipewire).
+Make sure that audioleaf's audio input is set to be your media player's output. On Linux this can be done with any audio mixer software, for example, with [pavucontrol](https://freedesktop.org/software/pulseaudio/pavucontrol) (for pulseaudio or pipewire), go to the *Recording* tab and make sure that the device in the dropdown menu is set correctly.
 
-Windows doesn't have an "easy" way to re-route one program's audio output as another's input. You'll have to use third-party software such as [VB Cable](https://vb-audio.com/Cable).
+![pavucontrol](https://github.com/alfazet/audioleaf/blob/main/images/pavucontrol.png)
+
+Windows doesn't have a "simple" way of re-routing one program's audio output to another's input. You'll have to use third-party software such as [VB Cable](https://vb-audio.com/Cable).
 
 ## Contributing
 
-Audioleaf is a past-time project made mainly as a means for me to become familiar with Rust, making TUIs, and some basics of audio processing.
+Audioleaf is a project made mainly in my spare time as a way to become familiar with Rust, making TUIs, and some basics of audio processing.
 
 Therefore, there are surely many ways to make it more robust, performant and nicer to use - feel free to open a pull request or start a Github issue if you see any potential for audioleaf's improvement. Thank you!
