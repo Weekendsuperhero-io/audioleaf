@@ -1,5 +1,5 @@
 use crate::{constants, ssdp, utils};
-use anyhow::{anyhow, Result};
+use anyhow::{bail, Result};
 use clap::Parser;
 use serde::Serialize;
 use std::fs::File;
@@ -113,7 +113,7 @@ impl Config {
                     tui_config.colorful_effect_names = Some(b);
                 }
                 (key, _) => {
-                    return Err(anyhow!(format!("Error: invalid key `{}`", key)));
+                    bail!(format!("invalid key `{}`", key));
                 }
             }
         }
@@ -131,29 +131,23 @@ impl Config {
                 }
                 ("freq_range", Value::Array(v)) => {
                     if v.len() != 2 {
-                        return Err(anyhow!(
-                            "Error: freq_range must be a 2-element integer array"
-                        ));
+                        bail!("freq_range must be a 2-element integer array");
                     }
                     let (Some(low), Some(high)) = (v[0].as_integer(), v[1].as_integer()) else {
-                        return Err(anyhow!(
-                            "Error: freq_range must be a 2-element integer array"
-                        ));
+                        bail!("freq_range must be a 2-element integer array");
                     };
                     visualizer_config.freq_range =
                         Some((u16::try_from(low)?, u16::try_from(high)?));
                 }
                 ("hues", Value::Array(v)) => {
                     if v.is_empty() {
-                        return Err(anyhow!("Error: hues cannot be an empty array"));
+                        bail!("hues cannot be an empty array");
                     }
                     if v.iter().map(|x| x.as_integer()).any(|x| match x.as_ref() {
                         Some(x) => !(0..360).contains(x),
                         None => true,
                     }) {
-                        return Err(anyhow!(
-                            "Error: hues must be integers from 0 to 359 inclusive"
-                        ));
+                        bail!("hues must be integers from 0 to 359 inclusive");
                     }
                     let hues: Vec<u16> = v
                         .into_iter()
@@ -177,7 +171,7 @@ impl Config {
                         _ => None,
                     };
                     if axis.is_none() {
-                        return Err(anyhow!("Error: axis must be `X` or `Y`"));
+                        bail!("axis must be `X` or `Y`");
                     };
                     visualizer_config.primary_axis = axis;
                 }
@@ -188,9 +182,7 @@ impl Config {
                         _ => None,
                     };
                     if sort.is_none() {
-                        return Err(anyhow!(
-                            "Error: sort must be `Asc` (ascending) or `Desc` (descending)"
-                        ));
+                        bail!("sort must be `Asc` (ascending) or `Desc` (descending)");
                     };
                     visualizer_config.sort_primary = sort;
                 }
@@ -201,14 +193,12 @@ impl Config {
                         _ => None,
                     };
                     if sort.is_none() {
-                        return Err(anyhow!(
-                            "Error: sort must be `Asc` (ascending) or `Desc` (descending)"
-                        ));
+                        bail!("sort must be `Asc` (ascending) or `Desc` (descending)");
                     };
                     visualizer_config.sort_secondary = sort;
                 }
                 (key, _) => {
-                    return Err(anyhow!(format!("Error: invalid key `{}`", key)));
+                    bail!(format!("invalid key `{}`", key));
                 }
             }
         }
@@ -236,7 +226,7 @@ impl Config {
                     Self::parse_visualizer_config(&mut visualizer_config, t)?;
                 }
                 (key, _) => {
-                    return Err(anyhow!(format!("Error: invalid key `{}`", key)));
+                    bail!(format!("invalid key `{}`", key));
                 }
             }
         }
@@ -267,10 +257,10 @@ pub fn resolve_paths(
             .join(constants::DEFAULT_CONFIG_FILE),
     };
     let Ok(config_file_exists) = Path::try_exists(&config_file_path) else {
-        return Err(anyhow!(format!(
-            "Error: insufficient permissions to access {}",
+        bail!(format!(
+            "insufficient permissions to access {}",
             config_file_path.to_string_lossy()
-        )));
+        ));
     };
     let devices_file_path = match devices_file_path {
         Some(path) => path,
@@ -280,10 +270,10 @@ pub fn resolve_paths(
             .join(constants::DEFAULT_DEVICES_FILE),
     };
     let Ok(devices_file_exists) = Path::try_exists(&devices_file_path) else {
-        return Err(anyhow!(format!(
-            "Error: insufficient permissions to access {}",
+        bail!(format!(
+            "insufficient permissions to access {}",
             devices_file_path.to_string_lossy()
-        )));
+        ));
     };
     Ok((
         (config_file_path, config_file_exists),
@@ -291,13 +281,19 @@ pub fn resolve_paths(
     ))
 }
 
-pub fn get_ip_from_stdin() -> Result<Ipv4Addr> {
+pub fn get_ip() -> Result<Ipv4Addr> {
     let (names, ips) = ssdp::ssdp_msearch()?;
-    let Some(i) = utils::ask_choose_one(&names)? else {
-        return Err(anyhow!("Error: Operation aborted by the user"));
+    let choice = utils::choose_ip(&names)?;
+    let ip = match choice {
+        utils::Choice::Automatic(i) => ips[i],
+        utils::Choice::Manual => match utils::get_ip_from_stdin()? {
+            Some(ip) => ip,
+            None => bail!("Operation aborted by the user"),
+        },
+        utils::Choice::Quit => bail!("Operation aborted by the user"),
     };
-    println!("Now enable pairing mode on `{}` (hold the On/Off button until the control lights start flashing).\n
-        Press any key when you're ready.", names[i]);
+    println!("Now enable pairing mode on the chosen device (hold its power button until the control lights start flashing).\n
+        Press any key when you're ready.");
     utils::wait_for_any_key()?;
-    Ok(ips[i])
+    Ok(ip)
 }

@@ -2,7 +2,7 @@ use crate::{
     config::{Axis, Sort},
     constants, utils,
 };
-use anyhow::{anyhow, Result};
+use anyhow::{bail, Result};
 use palette::{FromColor, Hsv, Srgb};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -59,7 +59,7 @@ impl NlDevice {
             &format!("http://{}:{}/api/v1/new", ip, constants::NL_API_PORT),
             None,
         ) else {
-            return Err(anyhow!(utils::generate_connection_error_msg(ip)));
+            bail!(utils::generate_connection_error_msg(ip));
         };
         let res_json: serde_json::Value = serde_json::from_str(&res)?;
 
@@ -73,7 +73,7 @@ impl NlDevice {
             constants::NL_API_PORT,
             token
         )) else {
-            return Err(anyhow!(utils::generate_connection_error_msg(ip)));
+            bail!(utils::generate_connection_error_msg(ip));
         };
         let res_json: serde_json::Value = serde_json::from_str(&res)?;
 
@@ -87,7 +87,7 @@ impl NlDevice {
             constants::NL_API_PORT,
             token
         )) else {
-            return Err(anyhow!(utils::generate_connection_error_msg(ip)));
+            bail!(utils::generate_connection_error_msg(ip));
         };
         let res_text: String = serde_json::from_str(&res)?;
         if res_text == "*Solid*"
@@ -108,7 +108,7 @@ impl NlDevice {
             constants::NL_API_PORT,
             self.token
         )) else {
-            return Err(anyhow!(utils::generate_connection_error_msg(&self.ip)));
+            bail!(utils::generate_connection_error_msg(&self.ip));
         };
         let res_json: serde_json::Value = serde_json::from_str(&res)?;
         let res_panels = res_json["positionData"].as_array().unwrap();
@@ -132,7 +132,7 @@ impl NlDevice {
             constants::NL_API_PORT,
             self.token
         )) else {
-            return Err(anyhow!(utils::generate_connection_error_msg(&self.ip)));
+            bail!(utils::generate_connection_error_msg(&self.ip));
         };
         let res_list: Vec<String> = serde_json::from_str(&res)?;
         let mut palettes = Vec::with_capacity(res_list.len());
@@ -152,7 +152,7 @@ impl NlDevice {
                 ),
                 Some(&data),
             ) else {
-                return Err(anyhow!(utils::generate_connection_error_msg(&self.ip)));
+                bail!(utils::generate_connection_error_msg(&self.ip));
             };
             let res_json: serde_json::Value = serde_json::from_str(&res)?;
             let palette_json = res_json["palette"].as_array().unwrap();
@@ -189,7 +189,7 @@ impl NlDevice {
             ),
             Some(&data),
         ) else {
-            return Err(anyhow!(utils::generate_connection_error_msg(&self.ip)));
+            bail!(utils::generate_connection_error_msg(&self.ip));
         };
         Ok(())
     }
@@ -218,7 +218,7 @@ impl NlDevice {
             ),
             Some(&data),
         ) else {
-            return Err(anyhow!(utils::generate_connection_error_msg(&self.ip)));
+            bail!(utils::generate_connection_error_msg(&self.ip));
         };
         Ok(())
     }
@@ -231,10 +231,7 @@ impl NlDevice {
         let devices = devices.nl_devices;
 
         if devices.is_empty() {
-            return Err(anyhow!(format!(
-                "Error: devices file {} is empty",
-                path.to_string_lossy()
-            )));
+            bail!(format!("devices file {} is empty", path.to_string_lossy()));
         }
         let Some(device_name) = device_name else {
             return Ok(devices.into_iter().next().unwrap());
@@ -244,10 +241,7 @@ impl NlDevice {
             .find(|device| device.name.as_str() == device_name)
         {
             Some(device) => Ok(device),
-            None => Err(anyhow!(format!(
-                "Error: Nanoleaf device `{}` not found",
-                device_name
-            ))),
+            None => bail!(format!("Nanoleaf device `{}` not found", device_name)),
         }
     }
 

@@ -301,7 +301,8 @@ impl App {
                 .left_aligned(),
             )
             .title_top(
-                Line::from(vec!["Press ".into(), "?".magenta(), " for help".into()]).right_aligned(),
+                Line::from(vec!["Press ".into(), "?".magenta(), " for help".into()])
+                    .right_aligned(),
             );
         match self.view {
             AppView::EffectList => {

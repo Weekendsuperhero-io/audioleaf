@@ -42,7 +42,7 @@ fn main() -> Result<()> {
             (nl_device, config.tui_config, config.visualizer_config)
         }
     } else {
-        let ip = config::get_ip_from_stdin()?;
+        let ip = config::get_ip()?;
         let nl_device = nanoleaf::NlDevice::new(ip)?;
         nl_device.append_to_file(&devices_file_path)?;
         let config = if config_file_exists {
