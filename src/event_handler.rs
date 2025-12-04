@@ -22,6 +22,7 @@ impl EventHandler {
                 if event::poll(tickrate).expect("event poll failed") {
                     let event = event::read().expect("event read failed");
                     if let event::Event::Key(key_event) = event {
+                        // Only process Press events to avoid duplicate triggers
                         if key_event.kind == event::KeyEventKind::Press {
                             tx.send(Event::Key(key_event)).expect("event send failed");
                         }

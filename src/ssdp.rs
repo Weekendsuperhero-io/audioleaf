@@ -40,20 +40,33 @@ fn parse_name_and_ip(s: &str) -> Option<(String, String)> {
 pub fn ssdp_msearch() -> Result<(Vec<String>, Vec<Ipv4Addr>)> {
     let socket = UdpSocket::bind("0.0.0.0:0")?;
     socket.join_multicast_v4(&SSDP_MULTICAST_ADDR.parse()?, &"0.0.0.0".parse()?)?;
-    socket.send_to(
-        format!(
-            "M-SEARCH * HTTP/1.1\r\nHOST: {SSDP_MULTICAST_ADDR}:{SSDP_MULTICAST_PORT}\r\n\
-            MAN: \"ssdp:discover\"\r\nMX: 1\r\nST: nanoleaf:nl29\r\n\r\n"
-        )
-        .as_bytes(),
-        format!("{SSDP_MULTICAST_ADDR}:{SSDP_MULTICAST_PORT}"),
-    )?;
+
+    // Search for different Nanoleaf device types
+    // nl29 = Canvas, nl42 = Shapes, nl52 = Elements
+    let device_types = [
+        "nanoleaf:nl29",
+        "nanoleaf:nl42",
+        "nanoleaf:nl52",
+        "nanoleaf_aurora:light",
+    ];
+    for device_type in &device_types {
+        socket.send_to(
+            format!(
+                "M-SEARCH * HTTP/1.1\r\nHOST: {SSDP_MULTICAST_ADDR}:{SSDP_MULTICAST_PORT}\r\n\
+                MAN: \"ssdp:discover\"\r\nMX: 1\r\nST: {}\r\n\r\n",
+                device_type
+            )
+            .as_bytes(),
+            format!("{SSDP_MULTICAST_ADDR}:{SSDP_MULTICAST_PORT}"),
+        )?;
+    }
+
     socket.set_read_timeout(Some(Duration::from_secs(1)))?;
     let (mut ips, mut names) = (vec![], vec![]);
     let mut buf = [0; 1 << 10];
     let timeout = Duration::from_secs(10);
     println!(
-        "Listening for Nanoleaf devices, timing out in {} seconds",
+        "Listening for Nanoleaf devices (Canvas/Shapes/Elements/Light Panels), timing out in {} seconds",
         timeout.as_secs()
     );
     let timer = Instant::now();
@@ -61,10 +74,13 @@ pub fn ssdp_msearch() -> Result<(Vec<String>, Vec<Ipv4Addr>)> {
         if let Ok((size, _)) = socket.recv_from(&mut buf) {
             let response = str::from_utf8(&buf[..size]).unwrap();
             if let Some((name, ip)) = parse_name_and_ip(response) {
-                println!("Discovered device `{}` with IP address {}", name, ip);
-                names.push(name);
-                let ip = ip.parse::<Ipv4Addr>()?;
-                ips.push(ip);
+                // Avoid adding duplicate devices
+                let parsed_ip = ip.parse::<Ipv4Addr>()?;
+                if !ips.contains(&parsed_ip) {
+                    println!("Discovered device `{}` with IP address {}", name, ip);
+                    names.push(name);
+                    ips.push(parsed_ip);
+                }
             }
         }
         if timer.elapsed() >= timeout {

@@ -156,6 +156,11 @@ impl Config {
                     visualizer_config.hues = Some(hues);
                 }
                 ("default_gain", Value::Float(x)) => {
+                    eprintln!("DEBUG: Parsed default_gain as Float: {}", x);
+                    visualizer_config.default_gain = Some(x as f32);
+                }
+                ("default_gain", Value::Integer(x)) => {
+                    eprintln!("DEBUG: Parsed default_gain as Integer: {}", x);
                     visualizer_config.default_gain = Some(x as f32);
                 }
                 ("transition_time", Value::Integer(x)) => {
@@ -206,9 +211,11 @@ impl Config {
     }
 
     pub fn parse_from_file(path: &Path) -> Result<Self> {
+        eprintln!("DEBUG: Reading config from: {}", path.display());
         let mut config_file = File::open(path)?;
         let mut contents = String::new();
         config_file.read_to_string(&mut contents)?;
+        eprintln!("DEBUG: Config file contents:\n{}", contents);
         let data = contents.parse::<Table>()?;
 
         let mut default_nl_device_name = None;
@@ -238,6 +245,10 @@ impl Config {
     }
 
     pub fn write_to_file(&self, path: &Path) -> Result<()> {
+        // Create parent directory if it doesn't exist
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let data = toml::to_string_pretty(self)?;
         let mut config_file = File::create(path)?;
         config_file.write_all(data.as_bytes())?;

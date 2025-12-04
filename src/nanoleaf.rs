@@ -115,6 +115,15 @@ impl NlDevice {
         let mut panels = Vec::new();
         for panel in res_panels.iter() {
             let id = panel["panelId"].as_u64().unwrap() as u16;
+            let shape_type = panel["shapeType"].as_u64().unwrap_or(0);
+
+            // Filter out controller units (shapeType 12) and other non-light panels
+            // shapeType 0-11 are actual light panels (Canvas squares, Shapes triangles, etc.)
+            // shapeType 12+ are controllers and other components
+            if shape_type >= 12 {
+                continue;
+            }
+
             let (x, y) = (
                 panel["x"].as_i64().unwrap() as i16,
                 panel["y"].as_i64().unwrap() as i16,
@@ -246,6 +255,10 @@ impl NlDevice {
     }
 
     pub fn append_to_file(&self, path: &Path) -> Result<()> {
+        // Create parent directory if it doesn't exist
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         let mut devices_file = OpenOptions::new().append(true).create(true).open(path)?;
         let data: String = toml::to_string_pretty(self)?;
         writeln!(devices_file, "[[nl_devices]]")?;

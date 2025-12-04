@@ -3,6 +3,7 @@ use palette::rgb::Srgb;
 use ratatui::{
     backend::{Backend, CrosstermBackend},
     crossterm::{
+        event::{self, Event},
         execute,
         terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
     },
@@ -71,11 +72,20 @@ pub fn get_ip_from_stdin() -> Result<Option<Ipv4Addr>> {
 }
 
 pub fn wait_for_any_key() -> Result<()> {
-    let mut input = String::new();
-    match io::stdin().read_line(&mut input) {
-        Ok(_) => Ok(()),
-        Err(e) => bail!(e),
+    // Enable raw mode temporarily to detect key presses
+    enable_raw_mode()?;
+
+    // Wait for any key press using crossterm event handling
+    loop {
+        if let Event::Key(_) = event::read()? {
+            break;
+        }
     }
+
+    // Disable raw mode and return to normal terminal
+    disable_raw_mode()?;
+    println!(); // Add newline after key press
+    Ok(())
 }
 
 pub fn init_tui() -> Result<Terminal<impl Backend>> {

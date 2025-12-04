@@ -112,6 +112,7 @@ impl App {
         let gain = visualizer_config
             .default_gain
             .unwrap_or(constants::DEFAULT_GAIN);
+        eprintln!("INFO: Starting with gain: {}", gain);
         let tx = visualizer::Visualizer::new(visualizer_config, audio_stream, &nl_device)?.init();
         let visualizer = Visualizer { tx, gain };
         let display_colors = tui_config
