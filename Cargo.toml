@@ -20,9 +20,9 @@ dirs = "5.0.1"
 num-complex = "0.4.6"
 palette = "0.7.6"
 ratatui = "0.29.0"
-reqwest = { version = "0.12.7", features = ["blocking", "json"] }
-serde = { version = "1.0.209", features = ["derive"] }
-serde_json = "1.0.127"
+reqwest = { version = "0.12.24", features = ["blocking", "json"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.145"
 toml = "0.9.8"
 
 [profile.release]
