@@ -7,6 +7,7 @@ mod config;
 mod constants;
 mod event_handler;
 mod nanoleaf;
+mod palettes;
 mod panic;
 mod processing;
 mod ssdp;

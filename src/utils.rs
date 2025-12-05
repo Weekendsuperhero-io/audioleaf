@@ -141,7 +141,14 @@ pub fn colors_from_hues(hues: &[u16], n: usize) -> Vec<palette::Hwb> {
     let mut res = Vec::from(hues);
     res.resize(n, *hues.last().unwrap());
     res.into_iter()
-        .map(|hue| palette::Hwb::new(hue as f32, 0.0, 1.0))
+        .map(|hue| {
+            // Use special hue value 360 to represent white (high whiteness)
+            if hue == 360 {
+                palette::Hwb::new(0.1, 1.0, 0.0) // White: any hue, high whiteness, starts black
+            } else {
+                palette::Hwb::new(hue as f32, 0.0, 1.0) // Normal colors: no whiteness
+            }
+        })
         .collect()
 }
 

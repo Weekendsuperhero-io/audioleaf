@@ -139,15 +139,29 @@ impl Config {
                     visualizer_config.freq_range =
                         Some((u16::try_from(low)?, u16::try_from(high)?));
                 }
+                ("hues", Value::String(s)) => {
+                    // Named palette support
+                    match crate::palettes::get_palette(&s) {
+                        Some(hues) => visualizer_config.hues = Some(hues),
+                        None => {
+                            let available = crate::palettes::get_palette_names().join(", ");
+                            bail!(
+                                "Unknown palette name '{}'. Available palettes: {}",
+                                s,
+                                available
+                            );
+                        }
+                    }
+                }
                 ("hues", Value::Array(v)) => {
                     if v.is_empty() {
                         bail!("hues cannot be an empty array");
                     }
                     if v.iter().map(|x| x.as_integer()).any(|x| match x.as_ref() {
-                        Some(x) => !(0..360).contains(x),
+                        Some(x) => !(0..=360).contains(x),
                         None => true,
                     }) {
-                        bail!("hues must be integers from 0 to 359 inclusive");
+                        bail!("hues must be integers from 0 to 360 inclusive (360 = white)");
                     }
                     let hues: Vec<u16> = v
                         .into_iter()

@@ -90,9 +90,12 @@ audio_backend = "BlackHole 2ch"
 # Lower range = bass-focused, higher range = treble-focused
 freq_range = [20, 4500]
 
-# Color palette as hue values (0-360 degrees on HSV color wheel)
-# See Color Palettes section for examples
-hues = [195, 210, 240, 270, 285, 300, 180]
+# Color palette - use a named palette OR custom hue array
+# Named palette (easiest - see Color Palettes section for all options):
+hues = "ocean-nightclub"
+# OR custom hue array (0-360 on HSB color wheel, 360 = white):
+# hues = [195, 210, 240, 270, 285, 300, 180]
+# hues = [0, 120, 360]  # Red, Green, White
 
 # Audio sensitivity multiplier (default: 1.0)
 # BlackHole 2ch directly: 1 (recommended)
@@ -123,62 +126,153 @@ sort_secondary = "Asc"    # "Asc" or "Desc"
 
 #### Visualizer Configuration
 
-| Option            | Type       | Default         | Description                                                     |
-| ----------------- | ---------- | --------------- | --------------------------------------------------------------- |
-| `audio_backend`   | string     | (auto-detected) | Name of audio input device to visualize                         |
-| `freq_range`      | [int, int] | `[20, 4500]`    | Min and max frequencies (Hz) to include in visualization        |
-| `hues`            | [int, ...] | varies          | List of HSV hue values (0-360°) for color palette               |
-| `default_gain`    | int/float  | `1.0`           | Audio amplification multiplier (doesn't affect playback volume) |
-| `transition_time` | int        | `2`             | Panel color transition time in 100ms units                      |
-| `time_window`     | float      | `0.1875`        | Audio sampling window length in seconds                         |
-| `primary_axis`    | string     | `"Y"`           | Primary sort direction: `"X"` or `"Y"`                          |
-| `sort_primary`    | string     | `"Asc"`         | Primary sort order: `"Asc"` or `"Desc"`                         |
-| `sort_secondary`  | string     | `"Asc"`         | Secondary sort order: `"Asc"` or `"Desc"`                       |
+| Option            | Type                 | Default         | Description                                                                         |
+| ----------------- | -------------------- | --------------- | ----------------------------------------------------------------------------------- |
+| `audio_backend`   | string               | (auto-detected) | Name of audio input device to visualize                                             |
+| `freq_range`      | [int, int]           | `[20, 4500]`    | Min and max frequencies (Hz) to include in visualization                            |
+| `hues`            | string or [int, ...] | varies          | Named palette (e.g., `"sunset"`) OR custom HSB hue array (0-360, use 360 for white) |
+| `default_gain`    | int/float            | `1.0`           | Audio amplification multiplier (doesn't affect playback volume)                     |
+| `transition_time` | int                  | `2`             | Panel color transition time in 100ms units                                          |
+| `time_window`     | float                | `0.1875`        | Audio sampling window length in seconds                                             |
+| `primary_axis`    | string               | `"Y"`           | Primary sort direction: `"X"` or `"Y"`                                              |
+| `sort_primary`    | string               | `"Asc"`         | Primary sort order: `"Asc"` or `"Desc"`                                             |
+| `sort_secondary`  | string               | `"Asc"`         | Secondary sort order: `"Asc"` or `"Desc"`                                           |
 
 ### Color Palettes
 
-Colors are specified using HSV hue values (0-360 degrees). Here are some pre-made palettes:
+Colors are specified using **HSB (Hue, Saturation, Brightness)** hue values ranging from **0-360**. You can use either:
 
-**Ocean Nightclub** (blues, purples, teals)
+1. **Named palettes** (easiest): `hues = "palette-name"`
+2. **Custom hue arrays**: `hues = [0, 60, 120, 180, 240, 300]`
+   - Use values 0-359 for colors on the HSB color wheel
+   - Use **360** for white/near-white colors
 
-```toml
-hues = [195, 210, 240, 270, 285, 300, 180]
-```
+#### Using Named Palettes
 
-**Sunset** (oranges, reds, purples)
-
-```toml
-hues = [0, 15, 30, 330, 300, 270]
-```
-
-**Neon** (bright rainbow)
+Simply set `hues` to one of the palette names below:
 
 ```toml
-hues = [0, 60, 120, 180, 240, 300]
+[visualizer_config]
+hues = "sunset"
 ```
 
-**Forest** (greens and yellows)
+#### Available Named Palettes
+
+**ocean-nightclub** - Deep blues, purples, and teals
 
 ```toml
-hues = [60, 80, 100, 120, 140]
+hues = "ocean-nightclub"
+# Equivalent to: hues = [195, 210, 240, 270, 285, 300, 180]
 ```
 
-**Fire** (reds and yellows)
+**sunset** - Warm oranges, reds, pinks, and purples
 
 ```toml
-hues = [0, 15, 30, 45, 60]
+hues = "sunset"
+# Equivalent to: hues = [15, 25, 340, 350, 0, 10, 310, 280]
 ```
 
-Use a [color wheel reference](https://developer.mozilla.org/en-US/blog/learn-css-hues-colors-hsl/color-wheel.svg) to pick custom hues:
+**house-music-party** - Energetic magentas, purples, blues, and cyans
 
-- Red: 0°
-- Orange: 30°
-- Yellow: 60°
-- Green: 120°
-- Cyan: 180°
-- Blue: 240°
-- Purple: 270°
-- Magenta: 300°
+```toml
+hues = "house-music-party"
+# Equivalent to: hues = [300, 285, 270, 255, 240, 195, 180]
+```
+
+**tropical-beach** - Turquoise, aqua, lime, and sunny yellows
+
+```toml
+hues = "tropical-beach"
+# Equivalent to: hues = [180, 175, 170, 160, 90, 75, 60]
+```
+
+**fire** - Intense reds, oranges, and yellows
+
+```toml
+hues = "fire"
+# Equivalent to: hues = [0, 10, 20, 30, 40, 50, 60]
+```
+
+**forest** - Deep greens with yellow-green highlights
+
+```toml
+hues = "forest"
+# Equivalent to: hues = [90, 100, 110, 120, 130, 140, 150]
+```
+
+**neon-rainbow** - Full spectrum bright colors
+
+```toml
+hues = "neon-rainbow"
+# Equivalent to: hues = [0, 60, 120, 180, 240, 300]
+```
+
+**pink-dreams** - Soft pinks through magentas
+
+```toml
+hues = "pink-dreams"
+# Equivalent to: hues = [320, 325, 330, 335, 340, 345, 350]
+```
+
+**cool-blues** - Ice blues to deep navy
+
+```toml
+hues = "cool-blues"
+# Equivalent to: hues = [190, 200, 210, 220, 230, 240, 250]
+```
+
+**tmnt** - Turtle green with Leonardo, Michelangelo, Raphael, and Donatello bandana colors
+
+```toml
+hues = "tmnt"
+# Equivalent to: hues = [125, 130, 240, 245, 25, 30, 0, 5, 280, 285]
+```
+
+**christmas** - Festive red, green, and white
+
+```toml
+hues = "christmas"
+# Equivalent to: hues = [0, 5, 120, 125, 360, 360]
+# Red (0, 5), Green (120, 125), White (360, 360)
+```
+
+### HSB Color Wheel Reference
+
+Hue values map to colors on the standard HSB color wheel (0-359 degrees):
+
+- **0° - Red**
+- 15° - Red-Orange
+- **30° - Orange**
+- 45° - Yellow-Orange
+- **60° - Yellow**
+- 90° - Yellow-Green
+- **120° - Green**
+- 150° - Blue-Green
+- **180° - Cyan**
+- 210° - Sky Blue
+- **240° - Blue**
+- 270° - Blue-Purple
+- **300° - Magenta**
+- 330° - Pink-Red
+- **359° - Back to Red**
+
+The Nanoleaf API uses **HSB (Hue, Saturation, Brightness)** color space where:
+
+- **Hue**: 0-359 (color position on the wheel)
+- **Saturation**: 0-100 (color intensity, controlled by device)
+- **Brightness**: 0-100 (lightness, controlled by device settings)
+
+In audioleaf configuration, you specify hue values (0-359). The visualizer dynamically adjusts brightness based on audio input.
+
+**Special white value**: Use **360** to create white/near-white colors. This adds high whiteness to the color, making it appear white or silvery when bright.
+
+Example with white:
+
+```toml
+hues = [0, 120, 360]  # Red, Green, White
+```
+
+For more details, see the [HSB Color System guide](https://www.learnui.design/blog/the-hsb-color-system-practicioners-primer.html) or the [Nanoleaf API documentation](https://forum.nanoleaf.me/docs).
 
 ### Audio Setup
 

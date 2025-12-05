@@ -2,11 +2,25 @@
 
 All notable changes to this fork of audioleaf are documented in this file.
 
-This fork focuses on macOS compatibility and support for all Nanoleaf device types.
+This fork focuses on macOS compatibility, support for all Nanoleaf device types, and enhanced color palette features.
 
-## [Unreleased]
+## [3.2.0] - 2025-12-05
 
 ### Added
+
+- **Named color palette support**: Easy-to-use preset color palettes
+  - Use `hues = "palette-name"` instead of manually specifying hue arrays
+  - 11 built-in palettes: ocean-nightclub, sunset, house-music-party, tropical-beach, fire, forest, neon-rainbow, pink-dreams, cool-blues, tmnt, christmas
+  - Still supports custom hue arrays: `hues = [0, 60, 120, 180, 240, 300]`
+  - Error messages show available palette names if invalid name is used
+  - Location: `src/palettes.rs` (new module)
+
+- **White color support**: Special hue value for white colors
+  - Use `360` in hue arrays to create white/near-white colors
+  - Example: `hues = [0, 120, 360]` creates red, green, and white
+  - Internally sets high whiteness value in HWB color space
+  - Perfect for Christmas theme and other palettes needing white accents
+  - Location: `src/utils.rs:colors_from_hues()`, `src/config.rs`
 
 - **Multi-device type support**: Added SSDP discovery for all Nanoleaf device types
   - Canvas (nl29)
@@ -29,9 +43,11 @@ This fork focuses on macOS compatibility and support for all Nanoleaf device typ
 - **Comprehensive documentation**:
   - Complete configuration reference with all options explained
   - Platform-specific audio setup guides (macOS, Linux, Windows)
-  - Pre-made color palette examples
+  - Pre-made color palette examples using HSB color system
+  - HSB color wheel reference (0-359 hue values)
   - Detailed troubleshooting section
   - Brightness adjustment instructions
+  - Clarified that Nanoleaf API uses HSB (Hue, Saturation, Brightness) color space
 
 ### Fixed
 
