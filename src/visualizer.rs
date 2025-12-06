@@ -27,6 +27,13 @@ pub enum VisualizerMsg {
     Resume,
     End,
     SetGain(f32),
+    SetPalette(Vec<u16>),
+    SetSorting {
+        primary_axis: crate::config::Axis,
+        sort_primary: crate::config::Sort,
+        sort_secondary: crate::config::Sort,
+        global_orientation: u16,
+    },
 }
 
 pub struct Visualizer {
@@ -35,7 +42,7 @@ pub struct Visualizer {
     audio_stream: AudioStream,
     gain: f32,
     time_window: f32,
-    trans_time: u16,
+    trans_time: i16,
     min_freq: u16,
     max_freq: u16,
     hues: Vec<u16>,
@@ -49,10 +56,19 @@ impl Visualizer {
     ) -> Result<Self> {
         let state = VisualizerState::default();
         let mut nl_udp = nanoleaf::NlUdp::new(nl_device)?;
-        nl_udp.sort_panels(
+
+        // Get global orientation and apply it when sorting panels
+        let global_orientation = nl_device
+            .get_global_orientation()
+            .ok()
+            .and_then(|o| o["value"].as_u64())
+            .unwrap_or(0) as u16;
+
+        nl_udp.sort_panels_with_orientation(
             config.primary_axis,
             config.sort_primary,
             config.sort_secondary,
+            global_orientation,
         );
         let gain = config.default_gain.unwrap_or(constants::DEFAULT_GAIN);
         let time_window = config.time_window.unwrap_or(constants::DEFAULT_TIME_WINDOW);
@@ -74,12 +90,30 @@ impl Visualizer {
         })
     }
 
-    fn update_state(&mut self, event: VisualizerMsg) {
+    fn update_state(&mut self, event: VisualizerMsg, colors: &mut Vec<palette::Hwb>) {
         match event {
             VisualizerMsg::Resume => self.state = VisualizerState::Running,
             VisualizerMsg::Pause => self.state = VisualizerState::Paused,
             VisualizerMsg::End => self.state = VisualizerState::Done,
             VisualizerMsg::SetGain(gain) => self.gain = gain,
+            VisualizerMsg::SetPalette(hues) => {
+                self.hues = hues;
+                *colors = utils::colors_from_hues(&self.hues, colors.len());
+            }
+            VisualizerMsg::SetSorting {
+                primary_axis,
+                sort_primary,
+                sort_secondary,
+                global_orientation,
+            } => {
+                self.nl_udp.sort_panels_with_orientation(
+                    Some(primary_axis),
+                    Some(sort_primary),
+                    Some(sort_secondary),
+                    global_orientation,
+                );
+                *colors = utils::colors_from_hues(&self.hues, self.nl_udp.panels.len());
+            }
         }
     }
 
@@ -155,10 +189,10 @@ impl Visualizer {
                     VisualizerState::Done => break,
                     VisualizerState::Paused => {
                         let event = rx_events.recv().expect("events sender disconnected");
-                        self.update_state(event);
+                        self.update_state(event, &mut colors);
                     }
                     VisualizerState::Running => match rx_events.try_recv() {
-                        Ok(event) => self.update_state(event),
+                        Ok(event) => self.update_state(event, &mut colors),
                         Err(err) => {
                             if err == TryRecvError::Disconnected {
                                 panic!("events sender disconnected");

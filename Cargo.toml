@@ -17,8 +17,10 @@ clap = { version = "4.5.16", features = ["derive"] }
 cpal = "0.16.0"
 dasp_sample = "0.11.0"
 dirs = "6.0.0"
+macroquad = "0.4"
 num-complex = "0.4.6"
 palette = "0.7.6"
+pollster = "0.3"
 ratatui = "0.29.0"
 reqwest = { version = "0.12.24", features = ["blocking", "json"] }
 serde = { version = "1.0.228", features = ["derive"] }

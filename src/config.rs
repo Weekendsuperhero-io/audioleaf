@@ -28,6 +28,30 @@ pub struct CliOptions {
     /// Explicitly add a new Nanoleaf device
     #[arg(short = 'n', long = "new")]
     pub add_new: bool,
+
+    #[command(subcommand)]
+    pub command: Option<Command>,
+}
+
+#[derive(Parser, Debug)]
+pub enum Command {
+    /// Dump information from device or configuration
+    Dump {
+        #[command(subcommand)]
+        dump_type: DumpType,
+    },
+}
+
+#[derive(Parser, Debug)]
+pub enum DumpType {
+    /// Dump panel layout information from the device
+    Layout,
+    /// Dump available color palettes
+    Palettes,
+    /// Dump device info from /api/v1/ endpoint (no auth required)
+    Info,
+    /// Show graphical panel layout visualization
+    LayoutGraphical,
 }
 
 #[derive(Debug, Serialize)]
@@ -50,7 +74,7 @@ pub enum Axis {
     Y,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Copy, Clone, Debug, Default, Serialize)]
 pub enum Sort {
     #[default]
     Asc,
@@ -63,7 +87,7 @@ pub struct VisualizerConfig {
     pub freq_range: Option<(u16, u16)>,
     pub hues: Option<Vec<u16>>,
     pub default_gain: Option<f32>,
-    pub transition_time: Option<u16>,
+    pub transition_time: Option<i16>,
     pub time_window: Option<f32>,
     pub primary_axis: Option<Axis>,
     pub sort_primary: Option<Sort>,
@@ -178,7 +202,11 @@ impl Config {
                     visualizer_config.default_gain = Some(x as f32);
                 }
                 ("transition_time", Value::Integer(x)) => {
-                    visualizer_config.transition_time = Some(u16::try_from(x)?);
+                    let trans_time = i16::try_from(x)?;
+                    if trans_time < -1 {
+                        bail!("transition_time must be -1 (instant) or a positive value. Note: units are in 100ms (1 = 100ms, 2 = 200ms, etc.)");
+                    }
+                    visualizer_config.transition_time = Some(trans_time);
                 }
                 ("time_window", Value::Float(x)) => {
                     visualizer_config.time_window = Some(x as f32);

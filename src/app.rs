@@ -4,7 +4,7 @@ use crate::event_handler::{self, Event};
 use crate::utils;
 use crate::visualizer::VisualizerMsg;
 use crate::{
-    config::{TuiConfig, VisualizerConfig},
+    config::{Axis, Sort, TuiConfig, VisualizerConfig},
     nanoleaf::{NlDevice, NlEffect},
     visualizer,
 };
@@ -50,6 +50,10 @@ enum AppMsg {
     ScrollToBottom,
     ScrollToTop,
     ChangeGain(f32),
+    ChangePalette(usize),
+    ToggleAxis,
+    TogglePrimarySort,
+    ToggleSecondarySort,
 }
 
 #[derive(Debug)]
@@ -69,6 +73,12 @@ struct EffectList {
 struct Visualizer {
     tx: mpsc::Sender<VisualizerMsg>,
     gain: f32,
+    current_palette_index: usize,
+    palette_names: Vec<String>,
+    primary_axis: Axis,
+    sort_primary: Sort,
+    sort_secondary: Sort,
+    global_orientation: u16,
 }
 
 #[derive(Debug)]
@@ -113,8 +123,34 @@ impl App {
             .default_gain
             .unwrap_or(constants::DEFAULT_GAIN);
         eprintln!("INFO: Starting with gain: {}", gain);
+
+        // Get global orientation
+        let global_orientation = nl_device
+            .get_global_orientation()
+            .ok()
+            .and_then(|o| o["value"].as_u64())
+            .unwrap_or(0) as u16;
+
+        let primary_axis = visualizer_config.primary_axis.unwrap_or_default();
+        let sort_primary = visualizer_config.sort_primary.unwrap_or_default();
+        let sort_secondary = visualizer_config.sort_secondary.unwrap_or_default();
+
         let tx = visualizer::Visualizer::new(visualizer_config, audio_stream, &nl_device)?.init();
-        let visualizer = Visualizer { tx, gain };
+
+        // Initialize palette list
+        let mut palette_names = crate::palettes::get_palette_names();
+        palette_names.sort();
+
+        let visualizer = Visualizer {
+            tx,
+            gain,
+            current_palette_index: 0,
+            palette_names,
+            primary_axis,
+            sort_primary,
+            sort_secondary,
+            global_orientation,
+        };
         let display_colors = tui_config
             .colorful_effect_names
             .unwrap_or(constants::DEFAULT_COLORFUL_EFFECT_NAMES);
@@ -199,6 +235,97 @@ impl App {
                 KeyCode::Char('=') | KeyCode::Char('+') => {
                     if let AppView::Visualizer = self.view {
                         AppMsg::ChangeGain(0.05)
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('1') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ChangePalette(0)
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('2') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ChangePalette(1)
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('3') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ChangePalette(2)
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('4') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ChangePalette(3)
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('5') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ChangePalette(4)
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('6') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ChangePalette(5)
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('7') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ChangePalette(6)
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('8') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ChangePalette(7)
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('9') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ChangePalette(8)
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('0') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ChangePalette(9)
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('a') | KeyCode::Char('A') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ToggleAxis
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('p') | KeyCode::Char('P') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::TogglePrimarySort
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('s') | KeyCode::Char('S') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ToggleSecondarySort
                     } else {
                         AppMsg::NoOp
                     }
@@ -288,6 +415,55 @@ impl App {
                     .send(VisualizerMsg::SetGain(self.visualizer.gain))?;
                 Ok(())
             }
+            AppMsg::ChangePalette(index) => {
+                if index < self.visualizer.palette_names.len() {
+                    let palette_name = &self.visualizer.palette_names[index];
+                    if let Some(hues) = crate::palettes::get_palette(palette_name) {
+                        self.visualizer.current_palette_index = index;
+                        self.visualizer.tx.send(VisualizerMsg::SetPalette(hues))?;
+                    }
+                }
+                Ok(())
+            }
+            AppMsg::ToggleAxis => {
+                self.visualizer.primary_axis = match self.visualizer.primary_axis {
+                    Axis::X => Axis::Y,
+                    Axis::Y => Axis::X,
+                };
+                self.visualizer.tx.send(VisualizerMsg::SetSorting {
+                    primary_axis: self.visualizer.primary_axis,
+                    sort_primary: self.visualizer.sort_primary,
+                    sort_secondary: self.visualizer.sort_secondary,
+                    global_orientation: self.visualizer.global_orientation,
+                })?;
+                Ok(())
+            }
+            AppMsg::TogglePrimarySort => {
+                self.visualizer.sort_primary = match self.visualizer.sort_primary {
+                    Sort::Asc => Sort::Desc,
+                    Sort::Desc => Sort::Asc,
+                };
+                self.visualizer.tx.send(VisualizerMsg::SetSorting {
+                    primary_axis: self.visualizer.primary_axis,
+                    sort_primary: self.visualizer.sort_primary,
+                    sort_secondary: self.visualizer.sort_secondary,
+                    global_orientation: self.visualizer.global_orientation,
+                })?;
+                Ok(())
+            }
+            AppMsg::ToggleSecondarySort => {
+                self.visualizer.sort_secondary = match self.visualizer.sort_secondary {
+                    Sort::Asc => Sort::Desc,
+                    Sort::Desc => Sort::Asc,
+                };
+                self.visualizer.tx.send(VisualizerMsg::SetSorting {
+                    primary_axis: self.visualizer.primary_axis,
+                    sort_primary: self.visualizer.sort_primary,
+                    sort_secondary: self.visualizer.sort_secondary,
+                    global_orientation: self.visualizer.global_orientation,
+                })?;
+                Ok(())
+            }
         }
     }
 
@@ -343,16 +519,71 @@ impl App {
                 );
             }
             AppView::Visualizer => {
-                frame.render_widget(
-                    Paragraph::new(vec![
-                        Line::from("Music Visualizer".bold().cyan()),
+                let current_palette = if self.visualizer.current_palette_index
+                    < self.visualizer.palette_names.len()
+                {
+                    &self.visualizer.palette_names[self.visualizer.current_palette_index]
+                } else {
+                    "Unknown"
+                };
+
+                let axis_str = match self.visualizer.primary_axis {
+                    Axis::X => "X",
+                    Axis::Y => "Y",
+                };
+                let primary_str = match self.visualizer.sort_primary {
+                    Sort::Asc => "Asc",
+                    Sort::Desc => "Desc",
+                };
+                let secondary_str = match self.visualizer.sort_secondary {
+                    Sort::Asc => "Asc",
+                    Sort::Desc => "Desc",
+                };
+
+                let mut lines = vec![
+                    Line::from("Music Visualizer".bold().cyan()),
+                    Line::from(""),
+                    Line::from(vec![
+                        "Amplitude gain: ".into(),
+                        format!("{:.2}", self.visualizer.gain).blue(),
+                    ]),
+                    Line::from(vec!["Current palette: ".into(), current_palette.green()]),
+                    Line::from(""),
+                    Line::from("Panel Sorting:".bold()),
+                    Line::from(vec![
+                        "  Primary Axis [A]: ".into(),
+                        axis_str.yellow(),
+                        "  |  Primary [P]: ".into(),
+                        primary_str.yellow(),
+                        "  |  Secondary [S]: ".into(),
+                        secondary_str.yellow(),
+                    ]),
+                    Line::from(""),
+                    Line::from("Available Palettes (press number to switch):".bold()),
+                ];
+
+                for (i, palette_name) in self.visualizer.palette_names.iter().enumerate().take(10) {
+                    let key = if i == 9 {
+                        "0".to_string()
+                    } else {
+                        (i + 1).to_string()
+                    };
+                    let is_current = i == self.visualizer.current_palette_index;
+                    let line = if is_current {
                         Line::from(vec![
-                            "Amplitude gain: ".into(),
-                            format!("{:.2}", self.visualizer.gain).blue(),
-                        ]),
-                    ])
-                    .block(main_block)
-                    .centered(),
+                            key.bold().yellow(),
+                            " - ".into(),
+                            palette_name.as_str().green().bold(),
+                            " ◀".green(),
+                        ])
+                    } else {
+                        Line::from(vec![key.bold(), " - ".into(), palette_name.as_str().into()])
+                    };
+                    lines.push(line);
+                }
+
+                frame.render_widget(
+                    Paragraph::new(lines).block(main_block).centered(),
                     frame.area(),
                 );
             }
@@ -367,7 +598,11 @@ impl App {
                         Line::from(vec!["Enter".bold(), " - play selected effect".into()]),
                         Line::from(vec!["V".bold(), " - toggle music visualizer mode".into()]),
                         Line::from(vec!["-/+".bold(), " - decrease/increase gain (in visualizer mode)".into()]),
-                        Line::from(vec!["(note that this doesn't affect your music volume, only the visuals are amplified)".italic()]),
+                        Line::from(vec!["1-9, 0".bold(), " - switch color palette (in visualizer mode)".into()]),
+                        Line::from(vec!["A".bold(), " - toggle primary axis X/Y (in visualizer mode)".into()]),
+                        Line::from(vec!["P".bold(), " - toggle primary sort Asc/Desc (in visualizer mode)".into()]),
+                        Line::from(vec!["S".bold(), " - toggle secondary sort Asc/Desc (in visualizer mode)".into()]),
+                        Line::from(vec!["(note that gain doesn't affect your music volume, only the visuals are amplified)".italic()]),
                     ])
                     .block(main_block)
                     .centered(),
