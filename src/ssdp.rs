@@ -13,10 +13,10 @@ fn parse_name_and_ip(s: &str) -> Option<(String, String)> {
     let (mut name, mut ip) = (None, None);
     for header in headers {
         if header.starts_with("Location") {
-            let split = header.split(' ');
+            let mut split = header.split(' ');
             ip = Some(
                 split
-                    .last()
+                    .next_back()
                     .unwrap()
                     .strip_prefix("http://")
                     .unwrap()
@@ -26,8 +26,8 @@ fn parse_name_and_ip(s: &str) -> Option<(String, String)> {
                     .to_string(),
             );
         } else if header.starts_with("nl-devicename") {
-            let split = header.split(':');
-            name = Some(split.last().unwrap().trim_start().to_string());
+            let mut split = header.split(':');
+            name = Some(split.next_back().unwrap().trim_start().to_string());
         }
     }
     if let (Some(name), Some(ip)) = (name, ip) {
