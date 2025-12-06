@@ -122,7 +122,7 @@ impl ShapeType {
     pub fn num_sides(&self) -> usize {
         match self.id {
             0 | 8 | 9 => 3,   // Triangles
-            2..=4 => 4,   // Squares
+            2..=4 => 4,       // Squares
             7 | 14 | 15 => 6, // Hexagons
             _ => 4,           // Default to square
         }

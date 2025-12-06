@@ -20,14 +20,16 @@ impl AudioStream {
         let device = match device_name {
             constants::DEFAULT_AUDIO_BACKEND => {
                 // Check for common loopback device names first
-                let loopback_names = ["BlackHole",
+                let loopback_names = [
+                    "BlackHole",
                     "BlackHole 2ch",
                     "BlackHole 16ch",
                     "Loopback Audio",
                     "CABLE Output",
                     "VB-Audio",
                     "Monitor",
-                    "monitor"];
+                    "monitor",
+                ];
 
                 let mut loopback_device = None;
                 if let Ok(devices) = host.input_devices() {
