@@ -1,6 +1,6 @@
 [package]
 name = "audioleaf"
-version = "3.2.0"
+version = "3.3.0"
 edition = "2021"
 authors = ["Antoni Zasada", "weekendsuperhero"]
 description = "Manage your Nanoleaf devices (Canvas, Shapes, Elements, Light Panels) and visualize music straight from the terminal"

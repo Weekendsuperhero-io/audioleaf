@@ -49,6 +49,24 @@ pub struct Visualizer {
 }
 
 impl Visualizer {
+    /// Initializes a new `Visualizer` instance with configuration and resources.
+    ///
+    /// Sets up UDP controller for panel updates, fetches global orientation from device for sorting.
+    /// Applies config values or defaults for gain, time_window, etc.
+    /// Sorts panels according to primary/secondary axes and sorts.
+    ///
+    /// Note: Audio stream is moved in, but actually played in `init()`.
+    /// Does not start audio capture or visualization loop yet.
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - VisualizerConfig with params like freq_range, hues, gain.
+    /// * `audio_stream` - Pre-configured CPAL input stream device/config.
+    /// * `nl_device` - Connected Nanoleaf device for UDP and API calls.
+    ///
+    /// # Errors
+    ///
+    /// From `NlUdp::new` if UDP setup fails, or device API for orientation.
     pub fn new(
         config: VisualizerConfig,
         audio_stream: AudioStream,
@@ -90,6 +108,16 @@ impl Visualizer {
         })
     }
 
+    /// Updates visualizer internal state or parameters based on received message.
+    ///
+    /// Dispatched in processing thread loop.
+    /// Modifies self fields and/or regenerates `colors` vector from hues.
+    /// For SetSorting, updates UDP panel order with orientation.
+    ///
+    /// # Arguments
+    ///
+    /// * `event` - Control message type.
+    /// * `colors` - Mutable reference to current HWB color array for panels (updated if palette/sort changes).
     fn update_state(&mut self, event: VisualizerMsg, colors: &mut Vec<palette::Hwb>) {
         match event {
             VisualizerMsg::Resume => self.state = VisualizerState::Running,
@@ -117,6 +145,14 @@ impl Visualizer {
         }
     }
 
+    /// Converts interleaved multi-channel audio data to mono envelope (max per frame) and sends to channel.
+    ///
+    /// Processes audio callback data: for each set of `n_channels` samples, converts to f32,
+    /// takes maximum absolute value as simplified mono amplitude envelope.
+    /// Sends Vec<f32> of these envelopes to mpsc channel for FFT processing.
+    ///
+    /// Generic over sample type T supporting sized conversion to f32.
+    /// Used in `create_data_callback` closure for CPAL stream.
     fn send_samples<T>(data: &[T], n_channels: usize, tx: &mpsc::Sender<Vec<f32>>)
     where
         T: SizedSample + ToSample<f32>,
@@ -133,6 +169,13 @@ impl Visualizer {
         tx.send(samples).expect("sending samples failed");
     }
 
+    /// Creates a closure suitable for CPAL `build_input_stream` callback.
+    ///
+    /// Captures `n_channels` and `tx` sender, returns `send_samples` bound to them.
+    /// The closure ignores `InputCallbackInfo` (timestamp not used).
+    /// Ensures Send + 'static for thread-safe stream usage.
+    ///
+    /// Generic T for sample type matching AudioStream format.
     fn create_data_callback<T>(
         n_channels: usize,
         tx: mpsc::Sender<Vec<f32>>,
@@ -143,6 +186,19 @@ impl Visualizer {
         move |data: &[T], _: &InputCallbackInfo| Self::send_samples(data, n_channels, &tx)
     }
 
+    /// Completes visualizer setup by starting audio capture stream and spawning processing thread.
+    ///
+    /// Builds and plays CPAL input stream matched to sample format, sending mono max samples via channel.
+    /// Spawns thread that:
+    /// - Registers panic handler.
+    /// - Loops receiving audio samples and control messages.
+    /// - Processes FFT spectrum, updates colors with gain/time_window/equalize.
+    /// - Applies sorting and sends HWB colors to panels via UDP with transition time.
+    /// - Handles pause/resume/end states.
+    ///
+    /// Returns sender for sending `VisualizerMsg` to control runtime behavior.
+    ///
+    /// Consumes self (moved into thread closure).
     pub fn init(mut self) -> mpsc::Sender<VisualizerMsg> {
         let (tx_events, rx_events) = mpsc::channel();
         thread::spawn(move || {

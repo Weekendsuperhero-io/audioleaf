@@ -9,6 +9,11 @@ pub struct ShapeType {
 }
 
 impl ShapeType {
+    /// Constructs a `ShapeType` from Nanoleaf's internal shape ID.
+    ///
+    /// Maps known IDs to panel types like triangles, squares, hexagons, controllers, and special shapes (e.g., Elements, Lines).
+    /// Provides `side_length` approximation for rendering and `name` for display.
+    /// Unknown IDs default to generic square with side 100.0.
     pub fn from_id(id: u64) -> Self {
         match id {
             0 => ShapeType {
@@ -119,6 +124,11 @@ impl ShapeType {
         }
     }
 
+    /// Returns the number of sides for this shape type, useful for polygon rendering.
+    ///
+    /// - 3 for triangles (IDs 0,8,9)
+    /// - 4 for squares and most others (default)
+    /// - 6 for hexagons (IDs 7,14,15)
     pub fn num_sides(&self) -> usize {
         match self.id {
             0 | 8 | 9 => 3,   // Triangles
@@ -138,6 +148,19 @@ pub struct PanelInfo {
     pub shape_type: ShapeType,
 }
 
+/// Parses the "positionData" array from Nanoleaf's panel layout JSON response.
+///
+/// Expects array of objects with "panelId" (u16), "x"/"y" (i16), "o" (orientation u16), "shapeType" (u64 ID).
+/// Converts coordinates and creates `PanelInfo` for each, using `ShapeType::from_id`.
+/// Defaults missing fields to 0.
+///
+/// # Arguments
+///
+/// * `layout_json` - serde_json::Value typically from /api/v1/panelLayout endpoint.
+///
+/// # Returns
+///
+/// `Result<Vec<PanelInfo>>` - List of parsed panel positions and types, or error if no positionData array.
 pub fn parse_layout(layout_json: &Value) -> Result<Vec<PanelInfo>> {
     let position_data = layout_json["positionData"]
         .as_array()
@@ -165,6 +188,12 @@ pub fn parse_layout(layout_json: &Value) -> Result<Vec<PanelInfo>> {
     Ok(panels)
 }
 
+/// Prints a textual summary and table of the Nanoleaf panel layout to stdout.
+///
+/// Computes bounds (min/max x,y), displays global orientation, and tabulates:
+/// Panel ID, Shape Type name, X/Y positions, Orientation (degrees), Side length.
+///
+/// Intended for CLI 'dump layout' command output. Suggests graphical alt for visual rep.
 pub fn visualize_layout(panels: &[PanelInfo], global_orientation: u16) {
     if panels.is_empty() {
         println!("No panels to visualize");

@@ -5,6 +5,11 @@ use std::{
     io::{stdout, Write},
 };
 
+/// Registers a custom panic hook to handle application crashes gracefully.
+///
+/// Disables raw mode and leaves alternate screen before printing crash message.
+/// Captures and saves backtrace to cache/audioleaf_backtrace.log if possible.
+/// Ensures TUI state is restored on panic in threads like event handler.
 pub fn register_backtrace_panic_handler() {
     std::panic::set_hook(Box::new(|panic_info| {
         let _ = terminal::disable_raw_mode();

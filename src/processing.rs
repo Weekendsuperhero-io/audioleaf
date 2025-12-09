@@ -2,6 +2,14 @@ use crate::utils;
 use num_complex::Complex32;
 use palette::Hwb;
 
+/// Recursive in-place radix-2 Cooley-Tukey FFT implementation.
+///
+/// Computes the discrete Fourier transform for a signal of length `n`.
+/// Modifies input `x` and stores result in `y`.
+/// `step` determines the stride between samples in sub-transforms for decimation-in-time approach.
+///
+/// Base case: n=1 copies x[0] to y[0].
+/// Recursive: splits into even/odd indices, computes twiddle factors for butterfly combination.
 fn fft(x: &mut [Complex32], y: &mut [Complex32], n: usize, step: usize) {
     if n == 1 {
         y[0] = x[0];
@@ -18,6 +26,19 @@ fn fft(x: &mut [Complex32], y: &mut [Complex32], n: usize, step: usize) {
     }
 }
 
+/// Processes raw time-domain audio samples to produce frequency-domain spectrum amplitudes for visualization.
+///
+/// Performs FFT on padded input (to next power of two), extracts positive frequencies,
+/// normalizes by sqrt(n), applies gain, and clamps amplitudes to [0,1] using x / sqrt(1 + x^2) sigmoid-like function.
+///
+/// # Arguments
+///
+/// * `samples` - Vec of f32 mono audio samples.
+/// * `gain` - Amplification factor applied before clamping.
+///
+/// # Returns
+///
+/// Vec<f32> of amplitude values for each frequency bin (up to Nyquist).
 pub fn process(samples: Vec<f32>, gain: f32) -> Vec<f32> {
     let mut n = samples.len();
     let mut complex_samples = samples
@@ -44,6 +65,24 @@ pub fn process(samples: Vec<f32>, gain: f32) -> Vec<f32> {
         .collect::<Vec<_>>()
 }
 
+/// Updates the blackness component of HWB colors based on audio frequency spectrum for animated visualization.
+///
+/// Divides the frequency range [min_freq, max_freq] into `colors.len()` logarithmic intervals.
+/// For each interval, tracks maximum amplitude (with equal loudness correction) and updates blackness
+/// with velocity-based decay/increase for smooth transitions. Uses cubic easing functions for rates.
+///
+/// # Arguments
+///
+/// * `spectrum` - FFT-derived amplitudes for frequency bins.
+/// * `hz_per_bin` - Frequency resolution (Hz per bin in spectrum).
+/// * `min_freq`/`max_freq` - Frequency range to consider for color mapping.
+/// * `colors` - Mutable slice of HWB colors; updates their blackness [0,1] (1=white, 0=saturated).
+/// * `prev_max` - Previous max amplitudes per interval for delta computation (mutated).
+/// * `speed` - Velocity accumulators for blackness changes per interval (mutated).
+///
+/// # Panics
+///
+/// May panic if spectrum length insufficient or invalid frequency params.
 pub fn update_colors(
     spectrum: Vec<f32>,
     hz_per_bin: u32,

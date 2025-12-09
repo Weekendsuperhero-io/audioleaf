@@ -24,6 +24,21 @@ pub enum Choice {
     Quit,
 }
 
+/// Prompts the user to select an option from a numbered list interactively.
+///
+/// Displays the list with indices starting from 1.
+/// Accepts input: number (selects index-1), "M" for manual mode, "Q" to quit.
+/// Loops until valid input, flushes stdout for immediate prompt visibility.
+///
+/// Used for selecting discovered Nanoleaf devices by name.
+///
+/// # Arguments
+///
+/// * `v` - Slice of displayable items (e.g., device names).
+///
+/// # Returns
+///
+/// `Result<Choice>` - Automatic selection with index, Manual, or Quit variant.
 pub fn choose_ip(v: &[impl Display]) -> Result<Choice> {
     for (i, option) in v.iter().enumerate() {
         println!("{}. {}", i + 1, option);
@@ -52,6 +67,14 @@ pub fn choose_ip(v: &[impl Display]) -> Result<Choice> {
     }
 }
 
+/// Interactively prompts for manual IPv4 address input from stdin.
+///
+/// Loops reading lines until valid IPv4 or "Q" to quit.
+/// Used after SSDP discovery if user chooses manual entry.
+///
+/// # Returns
+///
+/// `Result<Option<Ipv4Addr>>` - Parsed IP or None on quit/cancel.
 pub fn get_ip_from_stdin() -> Result<Option<Ipv4Addr>> {
     loop {
         print!("Enter the local IP address of your Nanoleaf device or 'Q' to quit: ");
@@ -71,6 +94,11 @@ pub fn get_ip_from_stdin() -> Result<Option<Ipv4Addr>> {
     }
 }
 
+/// Pauses execution until any key is pressed, with TUI-friendly handling.
+///
+/// Temporarily enables raw mode for crossterm event polling.
+/// Loops reading events until Key event received (any key).
+/// Disables raw mode, prints newline, used for user confirmation prompts (e.g., pairing mode).
 pub fn wait_for_any_key() -> Result<()> {
     // Enable raw mode temporarily to detect key presses
     enable_raw_mode()?;
@@ -88,22 +116,57 @@ pub fn wait_for_any_key() -> Result<()> {
     Ok(())
 }
 
+/// Initializes the terminal user interface (TUI) environment.
+///
+/// Enables raw mode for input handling, enters alternate screen buffer,
+/// creates a new ratatui Terminal with CrosstermBackend on stdout.
+///
+/// Called before running the app TUI loop.
+///
+/// # Returns
+///
+/// `Result<Terminal<CrosstermBackend<Stdout>>>` wrapped in impl Backend.
 pub fn init_tui() -> Result<Terminal<impl Backend>> {
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
     Terminal::new(CrosstermBackend::new(stdout())).map_err(anyhow::Error::from)
 }
 
+/// Cleans up the TUI environment after app exit.
+///
+/// Disables raw mode and leaves alternate screen to restore normal terminal state.
+/// Called after app run to prevent hanging or corrupted display.
+///
+/// # Errors
+///
+/// Propagates crossterm execution errors.
 pub fn destroy_tui() -> Result<(), anyhow::Error> {
     disable_raw_mode()?;
     execute!(stdout(), LeaveAlternateScreen)?;
     Ok(())
 }
 
+/// Generates a user-friendly error message for failed Nanoleaf device connection.
+///
+/// Formats "couldn't connect to the Nanoleaf device at IP {ip}".
 pub fn generate_connection_error_msg(ip: &Ipv4Addr) -> String {
     format!("couldn't connect to the Nanoleaf device at IP {}", ip)
 }
 
+/// Performs a blocking POST request to a Nanoleaf API endpoint.
+///
+/// Optionally includes JSON body data. Executes and checks status, returns response text.
+///
+/// Used for authenticated API calls requiring POST (e.g., setting effects, panels).
+///
+/// # Arguments
+///
+/// * `url` - Full API URL like "http://ip:16021/api/v1/{token}/..." .
+/// * `data` - Optional JSON value for request body.
+///
+/// # Returns
+///
+/// `Result<String>` - Response body as string, or error if send/status fails.
 pub fn request_post(url: &str, data: Option<&serde_json::Value>) -> Result<String> {
     let mut client = Client::new().post(url);
     if let Some(data) = data {
@@ -116,6 +179,20 @@ pub fn request_post(url: &str, data: Option<&serde_json::Value>) -> Result<Strin
     Ok(res.text()?.to_string())
 }
 
+/// Performs a blocking PUT request to a Nanoleaf API endpoint.
+///
+/// Similar to `request_post`, but uses PUT method. Optional JSON body.
+///
+/// Used for updating resources like panel colors, effects, or layout.
+///
+/// # Arguments
+///
+/// * `url` - API endpoint URL.
+/// * `data` - Optional JSON payload.
+///
+/// # Returns
+///
+/// `Result<String>` - Response text or error on failure.
 pub fn request_put(url: &str, data: Option<&serde_json::Value>) -> Result<String> {
     let mut client = Client::new().put(url);
     if let Some(data) = data {
@@ -128,6 +205,18 @@ pub fn request_put(url: &str, data: Option<&serde_json::Value>) -> Result<String
     Ok(res.text()?.to_string())
 }
 
+/// Performs a blocking GET request to a Nanoleaf API endpoint.
+///
+/// No body, returns response text after status check.
+/// Used for retrieving data like device info, effects list, layout, token auth.
+///
+/// # Arguments
+///
+/// * `url` - API URL to fetch.
+///
+/// # Returns
+///
+/// `Result<String>` - JSON response as string or error.
 pub fn request_get(url: &str) -> Result<String> {
     let client = Client::new().get(url);
     let res = client
@@ -137,6 +226,12 @@ pub fn request_get(url: &str) -> Result<String> {
     Ok(res.text()?.to_string())
 }
 
+/// Generates HWB colors from a list of hues, expanding or truncating to exact count `n`.
+///
+/// Repeats last hue if fewer than `n`, cycles if more? No, resizes vec from hues slice.
+/// Hue=360 special-cased as white (H=0.1, W=1.0, B=0.0); others H=hue f32, W=0, B=1 (saturated full brightness).
+///
+/// Used to map palette hues to panel colors in visualizer.
 pub fn colors_from_hues(hues: &[u16], n: usize) -> Vec<palette::Hwb> {
     let mut res = Vec::from(hues);
     res.resize(n, *hues.last().unwrap());
@@ -190,10 +285,18 @@ pub fn equalize(a: f32, f: u32) -> f32 {
     }
 }
 
+/// Splits a 16-bit unsigned integer into high and low bytes.
+///
+/// Computes high = x >> 8 (or /256), low = x & 0xFF (or %256).
+/// Used for serializing values in Nanoleaf UDP protocol packets.
 pub fn split_into_bytes(x: u16) -> (u8, u8) {
     ((x / 256) as u8, (x % 256) as u8)
 }
 
+/// Creates a ratatui `Line` with effect name characters styled in cycling colors from a palette.
+///
+/// Splits string into individual chars, applies foreground color from `colors` array cycling by index.
+/// Used when `config.tui_config.colorful_effect_names` is true to highlight effect list items.
 pub fn colorful_effect_name<'a>(effect_name: &'a str, colors: &'a [Srgb<u8>]) -> Line<'a> {
     let chars = effect_name.chars().map(|c| c.to_string());
     Line::from(
