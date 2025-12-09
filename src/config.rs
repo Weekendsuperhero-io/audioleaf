@@ -60,6 +60,10 @@ pub struct TuiConfig {
 }
 
 impl TuiConfig {
+    /// Returns the default TUI configuration.
+    ///
+    /// Sets `colorful_effect_names` to the constant `DEFAULT_COLORFUL_EFFECT_NAMES` (typically false,
+    /// meaning effect names in the effect list are displayed without per-character coloring based on palette).
     pub fn default() -> Self {
         TuiConfig {
             colorful_effect_names: Some(constants::DEFAULT_COLORFUL_EFFECT_NAMES),
@@ -95,6 +99,16 @@ pub struct VisualizerConfig {
 }
 
 impl VisualizerConfig {
+    /// Returns the default visualizer configuration.
+    ///
+    /// Initializes with constants:
+    /// - `audio_backend`: "default"
+    /// - `freq_range`: (20, 4500) Hz
+    /// - `hues`: Standard rainbow-like [30,0,330,...]
+    /// - `default_gain`: 1.0
+    /// - `transition_time`: 2 (200ms)
+    /// - `time_window`: 0.1875 s
+    /// - Sorting: Y axis ascending, secondary ascending
     pub fn default() -> Self {
         VisualizerConfig {
             audio_backend: Some("default".to_string()),
@@ -118,6 +132,15 @@ pub struct Config {
 }
 
 impl Config {
+    /// Constructs a new `Config` instance with optional component overrides.
+    ///
+    /// Uses defaults for unspecified sub-configs via their `default()` methods.
+    ///
+    /// # Arguments
+    ///
+    /// * `default_nl_device_name` - Optional default Nanoleaf device name for quick selection.
+    /// * `tui_config` - Optional TUI settings; defaults to `TuiConfig::default()`.
+    /// * `visualizer_config` - Optional visualizer params; defaults to `VisualizerConfig::default()`.
     pub fn new(
         default_nl_device_name: Option<String>,
         tui_config: Option<TuiConfig>,
@@ -130,6 +153,20 @@ impl Config {
         }
     }
 
+    /// Parses a TOML table into the fields of a mutable `TuiConfig`.
+    ///
+    /// Supports key "colorful_effect_names" as boolean value.
+    /// Ignores unknown keys? No, bails with error on invalid keys.
+    /// Updates `tui_config` in place.
+    ///
+    /// # Arguments
+    ///
+    /// * `tui_config` - Mutable reference to populate.
+    /// * `t` - TOML table from config section.
+    ///
+    /// # Errors
+    ///
+    /// `anyhow::Error` for invalid key types or unknown keys.
     pub fn parse_tui_config(tui_config: &mut TuiConfig, t: toml::Table) -> Result<()> {
         for (key, val) in t {
             match (key.as_str(), val) {
@@ -144,6 +181,29 @@ impl Config {
         Ok(())
     }
 
+    /// Parses a TOML table into the fields of a mutable `VisualizerConfig`.
+    ///
+    /// Supports comprehensive field validation and type conversion:
+    /// - `audio_backend`: String for device name.
+    /// - `freq_range`: 2-element array of u16 [min_hz, max_hz].
+    /// - `hues`: Array of u16 (0-360) or string name of predefined palette (e.g., "ocean-nightclub").
+    /// - `default_gain`: f32 or i64, applied to spectrum amplitudes.
+    /// - `transition_time`: i16 (-1 for instant, positive in 100ms units for Nanoleaf transitions).
+    /// - `time_window`: f32 seconds for smoothing window.
+    /// - `primary_axis`: "X" or "Y" enum.
+    /// - `sort_primary`/`sort_secondary`: "Asc" or "Desc".
+    ///
+    /// Validates ranges (e.g., hues 0-360, transition_time >= -1) and bails on errors or unknown keys.
+    /// Palette names checked against available predefined palettes.
+    ///
+    /// # Arguments
+    ///
+    /// * `visualizer_config` - Mutable reference to update.
+    /// * `t` - TOML table from [visualizer_config] section.
+    ///
+    /// # Errors
+    ///
+    /// `anyhow::Error` for parsing failures, invalid values, or unknown keys.
     pub fn parse_visualizer_config(
         visualizer_config: &mut VisualizerConfig,
         t: toml::Table,
@@ -252,6 +312,28 @@ impl Config {
         Ok(())
     }
 
+    /// Loads and parses the full application configuration from a TOML file.
+    ///
+    /// Reads the file content, deserializes to TOML `Table`, then:
+    /// - Extracts optional `default_nl_device_name` string.
+    /// - Parses `[tui_config]` section using `parse_tui_config`.
+    /// - Parses `[visualizer_config]` section using `parse_visualizer_config`.
+    /// - Uses defaults for missing sections or fields.
+    /// - Bails on unknown top-level keys or sub-config parse errors.
+    ///
+    /// Debug-logs file path and contents for verification.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Path to the config.toml file.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Config>` - Fully parsed and validated configuration.
+    ///
+    /// # Errors
+    ///
+    /// File I/O errors, TOML deserialization failures, or validation bails.
     pub fn parse_from_file(path: &Path) -> Result<Self> {
         eprintln!("DEBUG: Reading config from: {}", path.display());
         let mut config_file = File::open(path)?;
@@ -286,6 +368,19 @@ impl Config {
         ))
     }
 
+    /// Serializes and writes the configuration to a TOML file at the given path.
+    ///
+    /// Uses `toml::to_string_pretty` for readable formatting.
+    /// Automatically creates parent directories if they do not exist.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - The config to serialize.
+    /// * `path` - Target file path for config.toml.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `std::fs` errors for directory creation or file writing, or TOML serialization errors.
     pub fn write_to_file(&self, path: &Path) -> Result<()> {
         // Create parent directory if it doesn't exist
         if let Some(parent) = path.parent() {
@@ -298,6 +393,23 @@ impl Config {
     }
 }
 
+/// Resolves absolute paths for configuration and devices TOML files.
+///
+/// Defaults to XDG config dir (~/.config/audioleaf/) + default filenames if not provided.
+/// Checks file existence (returns bool in tuple) and permissions.
+///
+/// # Arguments
+///
+/// * `config_file_path` - Optional override for config.toml path.
+/// * `devices_file_path` - Optional override for nl_devices.toml path.
+///
+/// # Returns
+///
+/// `Result<((PathBuf, bool), (PathBuf, bool))>` - Resolved paths and their existence flags.
+///
+/// # Errors
+///
+/// `anyhow::Error` if insufficient permissions to check path existence.
 pub fn resolve_paths(
     config_file_path: Option<PathBuf>,
     devices_file_path: Option<PathBuf>,
@@ -334,6 +446,19 @@ pub fn resolve_paths(
     ))
 }
 
+/// Interactively discovers Nanoleaf devices via SSDP or accepts manual IP input.
+///
+/// Performs SSDP M-SEARCH to find devices on network, lists names/IPs for user choice.
+/// Supports automatic selection by number, 'M' for manual IP entry, 'Q' to quit.
+/// Prompts user to enable pairing mode on device before returning selected IP.
+///
+/// # Returns
+///
+/// `Result<Ipv4Addr>` - The chosen device IP address.
+///
+/// # Errors
+///
+/// Propagates errors from SSDP discovery, IP parsing, or user abort (bail!).
 pub fn get_ip() -> Result<Ipv4Addr> {
     let (names, ips) = ssdp::ssdp_msearch()?;
     let choice = utils::choose_ip(&names)?;

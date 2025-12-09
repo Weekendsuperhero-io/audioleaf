@@ -36,12 +36,33 @@ struct NlDevices {
 }
 
 impl From<Vec<NlDevice>> for NlDevices {
+    /// Wraps a vector of devices into the TOML-serializable NlDevices struct.
+    ///
+    /// Used for saving/loading multiple known devices from nl_devices.toml file.
     fn from(nl_devices: Vec<NlDevice>) -> Self {
         NlDevices { nl_devices }
     }
 }
 
 impl NlDevice {
+    /// Creates a new `NlDevice` instance for a given IP address.
+    ///
+    /// Performs API calls to:
+    /// - Obtain auth token via POST /api/v1/new (requires device in pairing mode).
+    /// - Fetch device name from GET /api/v1/{token}.
+    /// - Get current effect name from GET /effects/select, mapping special names to None.
+    ///
+    /// # Arguments
+    ///
+    /// * `ip` - Local IPv4 address of the Nanoleaf device.
+    ///
+    /// # Returns
+    ///
+    /// `Result<NlDevice>` with name, ip, token, optional cur_effect_name.
+    ///
+    /// # Errors
+    ///
+    /// From HTTP requests or JSON parsing; bails on connection failure.
     pub fn new(ip: Ipv4Addr) -> Result<Self> {
         let token = Self::get_token(&ip)?;
         let name = Self::get_name(&ip, &token)?;
@@ -101,6 +122,18 @@ impl NlDevice {
         }
     }
 
+    /// Retrieves the panel layout configuration from the device API.
+    ///
+    /// GET /api/v1/{token}/panelLayout/layout returns JSON with "positionData" array of panel positions/shapes.
+    /// Used for layout visualization and panel sorting/indexing in UDP.
+    ///
+    /// # Returns
+    ///
+    /// `Result<serde_json::Value>` - Raw JSON response.
+    ///
+    /// # Errors
+    ///
+    /// HTTP or parsing errors, bails on connection fail.
     pub fn get_panel_layout(&self) -> Result<serde_json::Value> {
         let Ok(res) = utils::request_get(&format!(
             "http://{}:{}/api/v1/{}/panelLayout/layout",

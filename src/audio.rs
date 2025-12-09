@@ -9,6 +9,24 @@ pub struct AudioStream {
 }
 
 impl AudioStream {
+    /// Creates a new `AudioStream` instance for capturing audio from an input device.
+    ///
+    /// Prioritizes loopback/monitor devices for system-wide audio capture (e.g., BlackHole on macOS).
+    /// Searches common names like "BlackHole", "Loopback Audio", etc.
+    /// Falls back to the system's default input device (often microphone) with a warning.
+    /// Supports specifying a custom device name via `device_name`.
+    ///
+    /// # Arguments
+    ///
+    /// * `device_name` - Optional name of the audio device to use. Defaults to automatic loopback detection.
+    ///
+    /// # Returns
+    ///
+    /// `Result<Self>` with the configured `AudioStream` containing device, sample format, and config.
+    ///
+    /// # Errors
+    ///
+    /// Propagates `cpal` errors for device discovery or config retrieval. Bail with available devices list if none match.
     pub fn new(device_name: Option<&str>) -> Result<Self> {
         let device_name = match device_name {
             Some(name) => name,

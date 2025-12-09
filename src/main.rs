@@ -16,10 +16,21 @@ mod ssdp;
 mod utils;
 mod visualizer;
 
+/// The main entry point of the Audioleaf application.
+///
+/// This function blocks on the asynchronous main logic using `pollster::block_on`.
+/// It sets up panic handling and parses CLI options before delegating to `main_async`.
 fn main() -> Result<()> {
     pollster::block_on(main_async())
 }
 
+/// Asynchronous main logic of the Audioleaf application.
+///
+/// Parses CLI options and handles different modes:
+/// - Dump commands (layout, palettes, info, graphical layout) without TUI.
+/// - Normal mode: loads or discovers Nanoleaf device, sets up config, runs TUI visualizer/effect selector.
+///
+/// Ensures device is ready (powered on, brightness set) before running the app.
 async fn main_async() -> Result<()> {
     panic::register_backtrace_panic_handler();
     let cli_options = config::CliOptions::parse();
@@ -81,6 +92,24 @@ async fn main_async() -> Result<()> {
     Ok(())
 }
 
+/// Handles 'dump' subcommands to display Nanoleaf device information or configuration without launching the TUI.
+///
+/// Supported dump types:
+/// - `Layout`: Fetches and prints panel layout data and global orientation.
+/// - `Palettes`: Lists all predefined color palettes available in the application.
+/// - `LayoutGraphical`: Renders an interactive graphical visualization of the panel layout using macroquad.
+/// - `Info`: Retrieves and prints basic device information from the /api/v1/ endpoint.
+///
+/// In all cases except `Palettes`, it connects to a known device or uses CLI-specified name.
+///
+/// # Arguments
+///
+/// * `dump_type` - Specifies which type of information to dump.
+/// * `cli_options` - Parsed CLI options including config paths and device name.
+///
+/// # Errors
+///
+/// Returns `anyhow::Error` for issues like missing devices file, connection failures, or JSON parsing errors.
 async fn handle_dump_command(
     dump_type: &config::DumpType,
     cli_options: &config::CliOptions,

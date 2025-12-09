@@ -93,6 +93,25 @@ pub struct App {
 }
 
 impl App {
+    /// Constructs a new `App` for TUI-based Nanoleaf effect selection and audio visualizer.
+    ///
+    /// Initializes:
+    /// - Effect list from device API, selects current effect if running.
+    /// - Visualizer with audio stream, UDP, config params, starts processing thread via `init()`.
+    /// - State to EffectList view, running effects mode.
+    /// - Palette names from predefined for switching.
+    /// - Colorful names from TUI config.
+    /// - Fetches device global orientation for panel sorting.
+    ///
+    /// # Arguments
+    ///
+    /// * `nl_device` - Connected Nanoleaf device.
+    /// * `tui_config` - UI settings like colorful effect names.
+    /// * `visualizer_config` - Audio/viz params like gain, hues, sorting.
+    ///
+    /// # Errors
+    ///
+    /// From device API, visualizer new/init, or effect list fetch.
     pub fn new(
         nl_device: NlDevice,
         tui_config: TuiConfig,
@@ -166,6 +185,21 @@ impl App {
         })
     }
 
+    /// Executes the main TUI application loop.
+    ///
+    /// Creates event handler for key/tick events.
+    /// Loop: draw current view, receive event, map to AppMsg, update app state.
+    /// Breaks when state=Done (quit).
+    /// On exit, sends End msg to visualizer to stop audio/UDP thread.
+    ///
+    /// # Arguments
+    ///
+    /// * `self` - Mutable app state.
+    /// * `terminal` - Ratatui terminal for rendering frames.
+    ///
+    /// # Errors
+    ///
+    /// From event recv, update logic, or draw.
     pub fn run(&mut self, terminal: &mut Terminal<impl Backend>) -> Result<()> {
         let event_handler = event_handler::EventHandler::new();
         loop {
@@ -181,6 +215,24 @@ impl App {
         Ok(())
     }
 
+    /// Converts raw terminal events to `AppMsg` for state updates.
+    ///
+    /// Ignores ticks (NoOp).
+    /// Maps KeyEvent codes to actions:
+    /// - ESC/Q: Quit
+    /// - Enter: Play selected effect in list view
+    /// - Up/Down/j/k: Scroll list
+    /// - g/G: Scroll top/bottom
+    /// - V: Toggle EffectList <-> Visualizer view
+    /// - ?: Toggle help screen
+    /// - +/-=_ : Adjust visualizer gain by ±0.05
+    /// - 0-9: Switch to numbered palette
+    /// - a/A: Toggle primary axis X/Y
+    /// - p/P: Toggle primary sort Asc/Desc
+    /// - s/S: Toggle secondary sort Asc/Desc
+    /// - Defaults to NoOp for unhandled.
+    ///
+    /// View-specific logic, e.g., scroll only in EffectList.
     fn event_to_msg(&self, event: Event) -> AppMsg {
         match event {
             Event::Tick => AppMsg::NoOp,
@@ -335,6 +387,22 @@ impl App {
         }
     }
 
+    /// Applies an `AppMsg` to update application state, views, or external components.
+    ///
+    /// Match on msg type:
+    /// - NoOp/Quit: Idle or set Done state.
+    /// - Scroll: Adjust effect list selection and scrollbar position.
+    /// - View change: Switch views, pause/resume visualizer or effects mode, enable UDP if needed.
+    /// - PlayEffect: Calls device.play_effect by selected name.
+    /// - ChangeGain/Palette: Send SetGain/SetPalette to visualizer tx.
+    /// - Toggles (Axis/Sorts): Flip enum, send SetSorting with current params to visualizer.
+    ///
+    /// Syncs list state with scrollbar for rendering.
+    /// Ensures state transitions (e.g., resume viz only if switching to it).
+    ///
+    /// # Errors
+    ///
+    /// From device API calls or visualizer msg send.
     fn update(&mut self, msg: AppMsg) -> Result<()> {
         match msg {
             AppMsg::NoOp => Ok(()),
@@ -467,6 +535,14 @@ impl App {
         }
     }
 
+    /// Renders the active view (effect list, visualizer, or help) into the terminal frame.
+    ///
+    /// Creates bordered main block with device name in magenta left title, right-aligned "? for help".
+    /// Dispatches to view-specific rendering:
+    /// - `EffectList`: Stateful list of NlEffect items, optional colorful char styling via palette,
+    ///   highlight with >> symbol, synced scrollbar with padding.
+    /// - Other views (Visualizer/HelpScreen): Implementation details for spectrum display or key bindings.
+    /// - Updates scrollbar state post-render if needed.
     fn render_view(&mut self, frame: &mut Frame) {
         let main_block = Block::new()
             .borders(Borders::ALL)
