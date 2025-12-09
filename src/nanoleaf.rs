@@ -101,7 +101,7 @@ impl NlDevice {
         }
     }
 
-    pub fn get_panels(&self) -> Result<Vec<Panel>> {
+    pub fn get_panel_layout(&self) -> Result<serde_json::Value> {
         let Ok(res) = utils::request_get(&format!(
             "http://{}:{}/api/v1/{}/panelLayout/layout",
             self.ip,
@@ -111,6 +111,108 @@ impl NlDevice {
             bail!(utils::generate_connection_error_msg(&self.ip));
         };
         let res_json: serde_json::Value = serde_json::from_str(&res)?;
+        Ok(res_json)
+    }
+
+    pub fn get_global_orientation(&self) -> Result<serde_json::Value> {
+        let Ok(res) = utils::request_get(&format!(
+            "http://{}:{}/api/v1/{}/panelLayout/globalOrientation",
+            self.ip,
+            constants::NL_API_PORT,
+            self.token
+        )) else {
+            bail!(utils::generate_connection_error_msg(&self.ip));
+        };
+        let res_json: serde_json::Value = serde_json::from_str(&res)?;
+        Ok(res_json)
+    }
+
+    pub fn get_device_info(&self) -> Result<serde_json::Value> {
+        let Ok(res) = utils::request_get(&format!(
+            "http://{}:{}/api/v1/{}/",
+            self.ip,
+            constants::NL_API_PORT,
+            self.token
+        )) else {
+            bail!(utils::generate_connection_error_msg(&self.ip));
+        };
+        let res_json: serde_json::Value = serde_json::from_str(&res)?;
+        Ok(res_json)
+    }
+
+    pub fn set_state(&self, power_on: Option<bool>, brightness: Option<u8>) -> Result<()> {
+        let mut state = serde_json::Map::new();
+
+        if let Some(on) = power_on {
+            let mut on_obj = serde_json::Map::new();
+            on_obj.insert("value".to_string(), serde_json::Value::Bool(on));
+            state.insert("on".to_string(), serde_json::Value::Object(on_obj));
+        }
+
+        if let Some(brightness_val) = brightness {
+            let mut brightness_obj = serde_json::Map::new();
+            brightness_obj.insert(
+                "value".to_string(),
+                serde_json::Value::Number(brightness_val.into()),
+            );
+            state.insert(
+                "brightness".to_string(),
+                serde_json::Value::Object(brightness_obj),
+            );
+        }
+
+        if state.is_empty() {
+            return Ok(());
+        }
+
+        let data = serde_json::Value::Object(state);
+        let Ok(_) = utils::request_put(
+            &format!(
+                "http://{}:{}/api/v1/{}/state",
+                self.ip,
+                constants::NL_API_PORT,
+                self.token
+            ),
+            Some(&data),
+        ) else {
+            bail!(utils::generate_connection_error_msg(&self.ip));
+        };
+        Ok(())
+    }
+
+    pub fn ensure_device_ready(&self) -> Result<()> {
+        let info = self.get_device_info()?;
+
+        let is_on = info["state"]["on"]["value"].as_bool().unwrap_or(true);
+        let brightness = info["state"]["brightness"]["value"].as_u64().unwrap_or(100) as u8;
+
+        let mut needs_power = false;
+        let mut needs_brightness = false;
+
+        if !is_on {
+            eprintln!("Device is off. Turning on...");
+            needs_power = true;
+        }
+
+        if brightness == 0 {
+            eprintln!("Device brightness is 0. Setting to 100...");
+            needs_brightness = true;
+        }
+
+        if needs_power || needs_brightness {
+            self.set_state(
+                if needs_power { Some(true) } else { None },
+                if needs_brightness { Some(100) } else { None },
+            )?;
+            // Give the device a moment to respond to the state change
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+
+        Ok(())
+    }
+
+    pub fn get_panels(&self) -> Result<Vec<Panel>> {
+        let res_json = self.get_panel_layout()?;
         let res_panels = res_json["positionData"].as_array().unwrap();
         let mut panels = Vec::new();
         for panel in res_panels.iter() {
@@ -288,49 +390,112 @@ impl NlUdp {
         })
     }
 
-    pub fn sort_panels(
+    pub fn sort_panels_with_orientation(
         &mut self,
         primary_axis: Option<Axis>,
         primary_sort: Option<Sort>,
         secondary_sort: Option<Sort>,
+        global_orientation: u16,
     ) {
         let primary_axis = primary_axis.unwrap_or_default();
         let primary_sort = primary_sort.unwrap_or_default();
         let secondary_sort = secondary_sort.unwrap_or_default();
+
+        // Apply global orientation rotation to coordinates if needed
+        let angle = -(global_orientation as f32).to_radians();
+        let needs_rotation = global_orientation != 0;
+
         let sort_func = match primary_axis {
             Axis::X => match (primary_sort, secondary_sort) {
-                (Sort::Asc, Sort::Asc) => {
-                    |lhs: &Panel, rhs: &Panel| (lhs.x, lhs.y).cmp(&(rhs.x, rhs.y))
-                }
-                (Sort::Asc, Sort::Desc) => {
-                    |lhs: &Panel, rhs: &Panel| (lhs.x, -lhs.y).cmp(&(rhs.x, -rhs.y))
-                }
-                (Sort::Desc, Sort::Asc) => {
-                    |lhs: &Panel, rhs: &Panel| (-lhs.x, lhs.y).cmp(&(-rhs.x, rhs.y))
-                }
-                (Sort::Desc, Sort::Desc) => {
-                    |lhs: &Panel, rhs: &Panel| (-lhs.x, -lhs.y).cmp(&(-rhs.x, -rhs.y))
-                }
+                (Sort::Asc, Sort::Asc) => |lhs: &Panel, rhs: &Panel, angle: f32, rotate: bool| {
+                    if rotate {
+                        let (lx, ly) = Self::rotate_coords(lhs.x, lhs.y, angle);
+                        let (rx, ry) = Self::rotate_coords(rhs.x, rhs.y, angle);
+                        (lx, ly).partial_cmp(&(rx, ry)).unwrap()
+                    } else {
+                        (lhs.x, lhs.y).cmp(&(rhs.x, rhs.y))
+                    }
+                },
+                (Sort::Asc, Sort::Desc) => |lhs: &Panel, rhs: &Panel, angle: f32, rotate: bool| {
+                    if rotate {
+                        let (lx, ly) = Self::rotate_coords(lhs.x, lhs.y, angle);
+                        let (rx, ry) = Self::rotate_coords(rhs.x, rhs.y, angle);
+                        (lx, -ly).partial_cmp(&(rx, -ry)).unwrap()
+                    } else {
+                        (lhs.x, -lhs.y).cmp(&(rhs.x, -rhs.y))
+                    }
+                },
+                (Sort::Desc, Sort::Asc) => |lhs: &Panel, rhs: &Panel, angle: f32, rotate: bool| {
+                    if rotate {
+                        let (lx, ly) = Self::rotate_coords(lhs.x, lhs.y, angle);
+                        let (rx, ry) = Self::rotate_coords(rhs.x, rhs.y, angle);
+                        (-lx, ly).partial_cmp(&(-rx, ry)).unwrap()
+                    } else {
+                        (-lhs.x, lhs.y).cmp(&(-rhs.x, rhs.y))
+                    }
+                },
+                (Sort::Desc, Sort::Desc) => |lhs: &Panel, rhs: &Panel, angle: f32, rotate: bool| {
+                    if rotate {
+                        let (lx, ly) = Self::rotate_coords(lhs.x, lhs.y, angle);
+                        let (rx, ry) = Self::rotate_coords(rhs.x, rhs.y, angle);
+                        (-lx, -ly).partial_cmp(&(-rx, -ry)).unwrap()
+                    } else {
+                        (-lhs.x, -lhs.y).cmp(&(-rhs.x, -rhs.y))
+                    }
+                },
             },
             Axis::Y => match (primary_sort, secondary_sort) {
-                (Sort::Asc, Sort::Asc) => {
-                    |lhs: &Panel, rhs: &Panel| (lhs.y, lhs.x).cmp(&(rhs.y, rhs.x))
-                }
-                (Sort::Asc, Sort::Desc) => {
-                    |lhs: &Panel, rhs: &Panel| (lhs.y, -lhs.x).cmp(&(rhs.y, -rhs.x))
-                }
-                (Sort::Desc, Sort::Asc) => {
-                    |lhs: &Panel, rhs: &Panel| (-lhs.y, lhs.x).cmp(&(-rhs.y, rhs.x))
-                }
-                (Sort::Desc, Sort::Desc) => {
-                    |lhs: &Panel, rhs: &Panel| (-lhs.y, -lhs.x).cmp(&(-rhs.y, -rhs.x))
-                }
+                (Sort::Asc, Sort::Asc) => |lhs: &Panel, rhs: &Panel, angle: f32, rotate: bool| {
+                    if rotate {
+                        let (lx, ly) = Self::rotate_coords(lhs.x, lhs.y, angle);
+                        let (rx, ry) = Self::rotate_coords(rhs.x, rhs.y, angle);
+                        (ly, lx).partial_cmp(&(ry, rx)).unwrap()
+                    } else {
+                        (lhs.y, lhs.x).cmp(&(rhs.y, rhs.x))
+                    }
+                },
+                (Sort::Asc, Sort::Desc) => |lhs: &Panel, rhs: &Panel, angle: f32, rotate: bool| {
+                    if rotate {
+                        let (lx, ly) = Self::rotate_coords(lhs.x, lhs.y, angle);
+                        let (rx, ry) = Self::rotate_coords(rhs.x, rhs.y, angle);
+                        (ly, -lx).partial_cmp(&(ry, -rx)).unwrap()
+                    } else {
+                        (lhs.y, -lhs.x).cmp(&(rhs.y, -rhs.x))
+                    }
+                },
+                (Sort::Desc, Sort::Asc) => |lhs: &Panel, rhs: &Panel, angle: f32, rotate: bool| {
+                    if rotate {
+                        let (lx, ly) = Self::rotate_coords(lhs.x, lhs.y, angle);
+                        let (rx, ry) = Self::rotate_coords(rhs.x, rhs.y, angle);
+                        (-ly, lx).partial_cmp(&(-ry, rx)).unwrap()
+                    } else {
+                        (-lhs.y, lhs.x).cmp(&(-rhs.y, rhs.x))
+                    }
+                },
+                (Sort::Desc, Sort::Desc) => |lhs: &Panel, rhs: &Panel, angle: f32, rotate: bool| {
+                    if rotate {
+                        let (lx, ly) = Self::rotate_coords(lhs.x, lhs.y, angle);
+                        let (rx, ry) = Self::rotate_coords(rhs.x, rhs.y, angle);
+                        (-ly, -lx).partial_cmp(&(-ry, -rx)).unwrap()
+                    } else {
+                        (-lhs.y, -lhs.x).cmp(&(-rhs.y, -rhs.x))
+                    }
+                },
             },
         };
-        self.panels.sort_by(|a: &Panel, b: &Panel| sort_func(a, b));
+        self.panels
+            .sort_by(|a: &Panel, b: &Panel| sort_func(a, b, angle, needs_rotation));
     }
 
-    pub fn update_panels(&self, colors: &[palette::Hwb], trans_time: u16) -> Result<()> {
+    fn rotate_coords(x: i16, y: i16, angle: f32) -> (i32, i32) {
+        let x_f = x as f32;
+        let y_f = y as f32;
+        let rotated_x = (x_f * angle.cos() - y_f * angle.sin()).round() as i32;
+        let rotated_y = (x_f * angle.sin() + y_f * angle.cos()).round() as i32;
+        (rotated_x, rotated_y)
+    }
+
+    pub fn update_panels(&self, colors: &[palette::Hwb], trans_time: i16) -> Result<()> {
         let mut buf = vec![0; 8 * self.panels.len() + 2];
         (buf[0], buf[1]) = utils::split_into_bytes(self.panels.len() as u16);
         for (i, color) in colors.iter().enumerate() {
@@ -348,7 +513,14 @@ impl NlUdp {
                 buf[offset + 4],
                 buf[offset + 5],
             ) = (r, g, b, 0);
-            (buf[offset + 6], buf[offset + 7]) = utils::split_into_bytes(trans_time);
+            // Convert i16 to bytes (supporting -1 for instant transition)
+            // trans_time is in units of 100ms: 1 = 100ms, 2 = 200ms, -1 = instant
+            let trans_time_u16 = if trans_time == -1 {
+                0xFFFF // -1 as u16 (two's complement)
+            } else {
+                trans_time as u16
+            };
+            (buf[offset + 6], buf[offset + 7]) = utils::split_into_bytes(trans_time_u16);
         }
         self.socket.send(&buf)?;
 
