@@ -4,24 +4,29 @@ use crate::event_handler::{self, Event};
 use crate::utils;
 use crate::visualizer::VisualizerMsg;
 use crate::{
-    config::{Axis, Sort, TuiConfig, VisualizerConfig},
+    config::{Axis, Effect, Sort, TuiConfig, VisualizerConfig},
     nanoleaf::{NlDevice, NlEffect},
     visualizer,
 };
 use anyhow::Result;
 use ratatui::{
+    Frame, Terminal,
     crossterm::event::KeyCode,
     layout::Margin,
     prelude::Backend,
-    style::{Style, Stylize},
-    text::Line,
+    style::{Color, Style, Stylize},
+    text::{Line, Span},
     widgets::{
         Block, Borders, HighlightSpacing, List, ListDirection, ListItem, ListState, Paragraph,
         Scrollbar, ScrollbarOrientation, ScrollbarState,
     },
-    Frame, Terminal,
 };
-use std::sync::mpsc;
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+    mpsc,
+};
+use std::time::Duration;
 
 #[derive(Debug, Default)]
 enum AppState {
@@ -51,9 +56,21 @@ enum AppMsg {
     ScrollToTop,
     ChangeGain(f32),
     ChangePalette(usize),
+    CycleEffect,
+    ResetPanels,
+    UseAlbumArtPalette,
     ToggleAxis,
     TogglePrimarySort,
     ToggleSecondarySort,
+}
+
+/// Display state shared between the main thread and the album art watcher thread.
+#[derive(Debug)]
+struct VizState {
+    /// The RGB colors currently driving the visualizer palette.
+    colors: Vec<[u8; 3]>,
+    /// Set when album art mode is active; cleared when switching to a named palette.
+    track_title: Option<String>,
 }
 
 #[derive(Debug)]
@@ -75,6 +92,9 @@ struct Visualizer {
     gain: f32,
     current_palette_index: usize,
     palette_names: Vec<String>,
+    viz_state: Arc<Mutex<VizState>>,
+    album_art_stop: Option<Arc<AtomicBool>>,
+    effect: Effect,
     primary_axis: Axis,
     sort_primary: Sort,
     sort_secondary: Sort,
@@ -153,18 +173,31 @@ impl App {
         let primary_axis = visualizer_config.primary_axis.unwrap_or_default();
         let sort_primary = visualizer_config.sort_primary.unwrap_or_default();
         let sort_secondary = visualizer_config.sort_secondary.unwrap_or_default();
+        let effect = visualizer_config.effect.unwrap_or_default();
+
+        let initial_colors = visualizer_config
+            .colors
+            .clone()
+            .unwrap_or_else(|| Vec::from(constants::DEFAULT_COLORS));
 
         let tx = visualizer::Visualizer::new(visualizer_config, audio_stream, &nl_device)?.init();
 
         // Initialize palette list
         let mut palette_names = crate::palettes::get_palette_names();
         palette_names.sort();
+        let viz_state = Arc::new(Mutex::new(VizState {
+            colors: initial_colors,
+            track_title: None,
+        }));
 
         let visualizer = Visualizer {
             tx,
             gain,
             current_palette_index: 0,
             palette_names,
+            viz_state,
+            album_art_stop: None,
+            effect,
             primary_axis,
             sort_primary,
             sort_secondary,
@@ -200,7 +233,10 @@ impl App {
     /// # Errors
     ///
     /// From event recv, update logic, or draw.
-    pub fn run(&mut self, terminal: &mut Terminal<impl Backend>) -> Result<()> {
+    pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<()>
+    where
+        B::Error: Send + Sync + 'static,
+    {
         let event_handler = event_handler::EventHandler::new();
         loop {
             terminal.draw(|frame| self.render_view(frame))?;
@@ -212,6 +248,14 @@ impl App {
             }
         }
         self.visualizer.tx.send(VisualizerMsg::End)?;
+        self.shutdown()
+    }
+
+    /// Shuts down the device by turning it off and setting brightness to 0.
+    ///
+    /// Called after the main TUI loop exits to restore the device to an off state.
+    pub fn shutdown(&self) -> Result<()> {
+        self.nl_device.set_state(Some(false), Some(0))?;
         Ok(())
     }
 
@@ -230,6 +274,7 @@ impl App {
     /// - a/A: Toggle primary axis X/Y
     /// - p/P: Toggle primary sort Asc/Desc
     /// - s/S: Toggle secondary sort Asc/Desc
+    /// - e/E: Cycle visual effect (Spectrum / Energy Wave)
     /// - Defaults to NoOp for unhandled.
     ///
     /// View-specific logic, e.g., scroll only in EffectList.
@@ -265,7 +310,7 @@ impl App {
                 }
                 KeyCode::Char('g') => AppMsg::ScrollToTop,
                 KeyCode::Char('G') => AppMsg::ScrollToBottom,
-                KeyCode::Char('V') => match self.view {
+                KeyCode::Char('V') | KeyCode::Char('v') => match self.view {
                     AppView::HelpScreen => AppMsg::NoOp,
                     AppView::EffectList => AppMsg::ChangeView(AppView::Visualizer),
                     AppView::Visualizer => AppMsg::ChangeView(AppView::EffectList),
@@ -382,9 +427,71 @@ impl App {
                         AppMsg::NoOp
                     }
                 }
+                KeyCode::Char('e') | KeyCode::Char('E') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::CycleEffect
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::UseAlbumArtPalette
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    if let AppView::Visualizer = self.view {
+                        AppMsg::ResetPanels
+                    } else {
+                        AppMsg::NoOp
+                    }
+                }
                 _ => AppMsg::NoOp,
             },
         }
+    }
+
+    /// Signals the album art watcher thread to stop, if one is running.
+    fn stop_album_art_watcher(&mut self) {
+        if let Some(stop) = self.visualizer.album_art_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        if let Ok(mut state) = self.visualizer.viz_state.lock() {
+            state.track_title = None;
+        }
+    }
+
+    /// Spawns a background thread that polls the current track title every 3 seconds.
+    /// When the title changes it fetches the new album art and sends SetPalette directly
+    /// to the visualizer thread. Stopped by setting the AtomicBool stop flag.
+    fn start_album_art_watcher(&mut self) {
+        self.stop_album_art_watcher();
+        let stop = Arc::new(AtomicBool::new(false));
+        self.visualizer.album_art_stop = Some(Arc::clone(&stop));
+        let tx = self.visualizer.tx.clone();
+        let viz_state = Arc::clone(&self.visualizer.viz_state);
+        std::thread::spawn(move || {
+            let mut last_title = crate::now_playing::get_track_title();
+            loop {
+                std::thread::sleep(Duration::from_secs(3));
+                if stop.load(Ordering::Relaxed) {
+                    break;
+                }
+                let title = crate::now_playing::get_track_title();
+                if title != last_title {
+                    last_title = title.clone();
+                    if let Some(colors) = crate::now_playing::fetch_palette() {
+                        if let Ok(mut state) = viz_state.lock() {
+                            state.colors = colors.clone();
+                            state.track_title = title;
+                        }
+                        let _ = tx.send(VisualizerMsg::SetPalette(colors));
+                    }
+                }
+            }
+        });
     }
 
     /// Applies an `AppMsg` to update application state, views, or external components.
@@ -407,6 +514,7 @@ impl App {
         match msg {
             AppMsg::NoOp => Ok(()),
             AppMsg::Quit => {
+                self.stop_album_art_watcher();
                 self.state = AppState::Done;
                 Ok(())
             }
@@ -486,11 +594,44 @@ impl App {
             AppMsg::ChangePalette(index) => {
                 if index < self.visualizer.palette_names.len() {
                     let palette_name = &self.visualizer.palette_names[index];
-                    if let Some(hues) = crate::palettes::get_palette(palette_name) {
+                    if let Some(colors) = crate::palettes::get_palette(palette_name) {
                         self.visualizer.current_palette_index = index;
-                        self.visualizer.tx.send(VisualizerMsg::SetPalette(hues))?;
+                        self.stop_album_art_watcher();
+                        if let Ok(mut state) = self.visualizer.viz_state.lock() {
+                            state.colors = colors.clone();
+                            state.track_title = None;
+                        }
+                        self.visualizer.tx.send(VisualizerMsg::SetPalette(colors))?;
                     }
                 }
+                Ok(())
+            }
+            AppMsg::UseAlbumArtPalette => {
+                eprintln!("DEBUG app: UseAlbumArtPalette triggered");
+                if let Some(colors) = crate::now_playing::fetch_palette() {
+                    let title = crate::now_playing::get_track_title();
+                    if let Ok(mut state) = self.visualizer.viz_state.lock() {
+                        state.colors = colors.clone();
+                        state.track_title = title;
+                    }
+                    self.visualizer.tx.send(VisualizerMsg::SetPalette(colors))?;
+                    self.start_album_art_watcher();
+                }
+                Ok(())
+            }
+            AppMsg::CycleEffect => {
+                self.visualizer.effect = match self.visualizer.effect {
+                    Effect::Spectrum => Effect::EnergyWave,
+                    Effect::EnergyWave => Effect::Pulse,
+                    Effect::Pulse => Effect::Spectrum,
+                };
+                self.visualizer
+                    .tx
+                    .send(VisualizerMsg::SetEffect(self.visualizer.effect))?;
+                Ok(())
+            }
+            AppMsg::ResetPanels => {
+                self.visualizer.tx.send(VisualizerMsg::ResetPanels)?;
                 Ok(())
             }
             AppMsg::ToggleAxis => {
@@ -595,12 +736,26 @@ impl App {
                 );
             }
             AppView::Visualizer => {
-                let current_palette = if self.visualizer.current_palette_index
-                    < self.visualizer.palette_names.len()
-                {
-                    &self.visualizer.palette_names[self.visualizer.current_palette_index]
-                } else {
-                    "Unknown"
+                // Snapshot display state from shared VizState (also written by watcher thread).
+                let (current_palette_name, track_title, palette_colors) = {
+                    let state = self.visualizer.viz_state.lock().unwrap();
+                    let name = if state.track_title.is_some() {
+                        "album-art".to_string()
+                    } else if self.visualizer.current_palette_index
+                        < self.visualizer.palette_names.len()
+                    {
+                        self.visualizer.palette_names[self.visualizer.current_palette_index].clone()
+                    } else {
+                        "Unknown".to_string()
+                    };
+                    (name, state.track_title.clone(), state.colors.clone())
+                };
+                let current_palette = current_palette_name.as_str();
+
+                let effect_str = match self.visualizer.effect {
+                    Effect::Spectrum => "Spectrum",
+                    Effect::EnergyWave => "Energy Wave",
+                    Effect::Pulse => "Pulse",
                 };
 
                 let axis_str = match self.visualizer.primary_axis {
@@ -616,6 +771,16 @@ impl App {
                     Sort::Desc => "Desc",
                 };
 
+                // Build color swatch line: two spaces per color with background set.
+                let mut swatch_spans: Vec<Span> = vec!["Colors: ".into()];
+                for [r, g, b] in &palette_colors {
+                    swatch_spans.push(Span::styled(
+                        "  ",
+                        Style::default().bg(Color::Rgb(*r, *g, *b)),
+                    ));
+                    swatch_spans.push(" ".into());
+                }
+
                 let mut lines = vec![
                     Line::from("Music Visualizer".bold().cyan()),
                     Line::from(""),
@@ -624,6 +789,16 @@ impl App {
                         format!("{:.2}", self.visualizer.gain).blue(),
                     ]),
                     Line::from(vec!["Current palette: ".into(), current_palette.green()]),
+                ];
+                if let Some(title) = &track_title {
+                    lines.push(Line::from(vec![
+                        "Now playing: ".into(),
+                        title.as_str().cyan().italic(),
+                    ]));
+                }
+                lines.push(Line::from(swatch_spans));
+                lines.extend([
+                    Line::from(vec!["Effect [E]: ".into(), effect_str.magenta()]),
                     Line::from(""),
                     Line::from("Panel Sorting:".bold()),
                     Line::from(vec![
@@ -636,7 +811,7 @@ impl App {
                     ]),
                     Line::from(""),
                     Line::from("Available Palettes (press number to switch):".bold()),
-                ];
+                ]);
 
                 for (i, palette_name) in self.visualizer.palette_names.iter().enumerate().take(10) {
                     let key = if i == 9 {
@@ -672,12 +847,15 @@ impl App {
                         Line::from(vec!["g/G".bold(), " - go to the top/bottom of the list".into()]),
                         Line::from(vec!["j/Down, k/Up".bold(), " - scroll down and up".into()]),
                         Line::from(vec!["Enter".bold(), " - play selected effect".into()]),
-                        Line::from(vec!["V".bold(), " - toggle music visualizer mode".into()]),
+                        Line::from(vec!["V/v".bold(), " - toggle music visualizer mode".into()]),
                         Line::from(vec!["-/+".bold(), " - decrease/increase gain (in visualizer mode)".into()]),
                         Line::from(vec!["1-9, 0".bold(), " - switch color palette (in visualizer mode)".into()]),
                         Line::from(vec!["A".bold(), " - toggle primary axis X/Y (in visualizer mode)".into()]),
                         Line::from(vec!["P".bold(), " - toggle primary sort Asc/Desc (in visualizer mode)".into()]),
                         Line::from(vec!["S".bold(), " - toggle secondary sort Asc/Desc (in visualizer mode)".into()]),
+                        Line::from(vec!["E".bold(), " - cycle visual effect: Spectrum / Energy Wave / Pulse (in visualizer mode)".into()]),
+                        Line::from(vec!["N".bold(), " - use album art colors from current track (in visualizer mode)".into()]),
+                        Line::from(vec!["R".bold(), " - reset all panels to black (in visualizer mode)".into()]),
                         Line::from(vec!["(note that gain doesn't affect your music volume, only the visuals are amplified)".italic()]),
                     ])
                     .block(main_block)

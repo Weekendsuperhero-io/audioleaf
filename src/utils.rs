@@ -1,20 +1,20 @@
-use anyhow::{bail, Result};
-use palette::rgb::Srgb;
+use anyhow::{Result, bail};
+use palette::{IntoColor, Oklch, Srgb};
 use ratatui::{
-    backend::{Backend, CrosstermBackend},
+    Terminal,
+    backend::CrosstermBackend,
     crossterm::{
         event::{self, Event},
         execute,
-        terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
     },
     style::{Color, Stylize},
     text::Line,
-    Terminal,
 };
 use reqwest::blocking::Client;
 use std::{
     fmt::Display,
-    io::{self, stdout, Write},
+    io::{self, Stdout, Write, stdout},
     net::Ipv4Addr,
 };
 
@@ -45,15 +45,18 @@ pub fn choose_ip(v: &[impl Display]) -> Result<Choice> {
     }
     let n = v.len();
     loop {
-        print!("Choose an option (by entering its number), enter 'M' to provide the IP adress manually or enter 'Q' to quit: ");
+        print!(
+            "Choose an option (by entering its number), enter 'M' to provide the IP adress manually or enter 'Q' to quit: "
+        );
         io::stdout().flush()?;
         let mut input = String::new();
         match io::stdin().read_line(&mut input) {
             Ok(_) => {
-                if let Ok(x) = input.trim().parse::<usize>() {
-                    if x >= 1 && x <= n {
-                        return Ok(Choice::Automatic(x - 1));
-                    }
+                if let Ok(x) = input.trim().parse::<usize>()
+                    && x >= 1
+                    && x <= n
+                {
+                    return Ok(Choice::Automatic(x - 1));
                 }
                 if input.trim() == "M" {
                     return Ok(Choice::Manual);
@@ -125,8 +128,8 @@ pub fn wait_for_any_key() -> Result<()> {
 ///
 /// # Returns
 ///
-/// `Result<Terminal<CrosstermBackend<Stdout>>>` wrapped in impl Backend.
-pub fn init_tui() -> Result<Terminal<impl Backend>> {
+/// `Result<Terminal<CrosstermBackend<Stdout>>>`.
+pub fn init_tui() -> Result<Terminal<CrosstermBackend<Stdout>>> {
     enable_raw_mode()?;
     execute!(stdout(), EnterAlternateScreen)?;
     Terminal::new(CrosstermBackend::new(stdout())).map_err(anyhow::Error::from)
@@ -226,23 +229,24 @@ pub fn request_get(url: &str) -> Result<String> {
     Ok(res.text()?.to_string())
 }
 
-/// Generates HWB colors from a list of hues, expanding or truncating to exact count `n`.
+/// Generates Oklch base colors from a list of RGB values, expanding or truncating to exact count `n`.
 ///
-/// Repeats last hue if fewer than `n`, cycles if more? No, resizes vec from hues slice.
-/// Hue=360 special-cased as white (H=0.1, W=1.0, B=0.0); others H=hue f32, W=0, B=1 (saturated full brightness).
+/// Repeats last color if fewer than `n`.
+/// Each RGB triplet is converted to Oklch preserving the perceptually correct hue, chroma, and lightness.
+/// The returned colors represent the **target** appearance at full brightness — the visualizer
+/// animates a separate brightness multiplier [0,1] that scales lightness, ensuring the original
+/// RGB color is faithfully reproduced at peak audio amplitude.
 ///
-/// Used to map palette hues to panel colors in visualizer.
-pub fn colors_from_hues(hues: &[u16], n: usize) -> Vec<palette::Hwb> {
-    let mut res = Vec::from(hues);
-    res.resize(n, *hues.last().unwrap());
-    res.into_iter()
-        .map(|hue| {
-            // Use special hue value 360 to represent white (high whiteness)
-            if hue == 360 {
-                palette::Hwb::new(0.1, 1.0, 0.0) // White: any hue, high whiteness, starts black
-            } else {
-                palette::Hwb::new(hue as f32, 0.0, 1.0) // Normal colors: no whiteness
-            }
+/// Used to map palette colors to panel base colors in visualizer.
+pub fn colors_from_rgb(rgb_colors: &[[u8; 3]], n: usize) -> Vec<Oklch> {
+    // Spread colors evenly across n panels.  With 4 colors and 12 panels
+    // each color covers 3 panels instead of the last color filling 9.
+    (0..n)
+        .map(|i| {
+            let color_idx = i * rgb_colors.len() / n;
+            let [r, g, b] = rgb_colors[color_idx];
+            let srgb = Srgb::new(r, g, b).into_format::<f32>();
+            srgb.into_color()
         })
         .collect()
 }

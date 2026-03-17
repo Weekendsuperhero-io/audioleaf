@@ -2,7 +2,7 @@ use crate::constants;
 use ratatui::crossterm::{execute, terminal};
 use std::{
     backtrace, fs,
-    io::{stdout, Write},
+    io::{Write, stdout},
 };
 
 /// Registers a custom panic hook to handle application crashes gracefully.

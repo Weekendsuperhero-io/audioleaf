@@ -1,6 +1,5 @@
 use crate::utils;
 use num_complex::Complex32;
-use palette::Hwb;
 
 /// Recursive in-place radix-2 Cooley-Tukey FFT implementation.
 ///
@@ -65,34 +64,37 @@ pub fn process(samples: Vec<f32>, gain: f32) -> Vec<f32> {
         .collect::<Vec<_>>()
 }
 
-/// Updates the blackness component of HWB colors based on audio frequency spectrum for animated visualization.
+/// Updates per-panel brightness values based on audio frequency spectrum for animated visualization.
 ///
-/// Divides the frequency range [min_freq, max_freq] into `colors.len()` logarithmic intervals.
-/// For each interval, tracks maximum amplitude (with equal loudness correction) and updates blackness
+/// Divides the frequency range [min_freq, max_freq] into `brightness.len()` logarithmic intervals.
+/// For each interval, tracks maximum amplitude (with equal loudness correction) and updates brightness
 /// with velocity-based decay/increase for smooth transitions. Uses cubic easing functions for rates.
+///
+/// Brightness is a multiplier in [0,1] applied to the base Oklch color's lightness.
+/// At 0 the panel is black; at 1 it shows the exact target color the user specified.
 ///
 /// # Arguments
 ///
 /// * `spectrum` - FFT-derived amplitudes for frequency bins.
 /// * `hz_per_bin` - Frequency resolution (Hz per bin in spectrum).
 /// * `min_freq`/`max_freq` - Frequency range to consider for color mapping.
-/// * `colors` - Mutable slice of HWB colors; updates their blackness [0,1] (1=white, 0=saturated).
+/// * `brightness` - Mutable slice of brightness multipliers [0,1] per panel (mutated).
 /// * `prev_max` - Previous max amplitudes per interval for delta computation (mutated).
-/// * `speed` - Velocity accumulators for blackness changes per interval (mutated).
+/// * `speed` - Velocity accumulators for brightness changes per interval (mutated).
 ///
 /// # Panics
 ///
 /// May panic if spectrum length insufficient or invalid frequency params.
-pub fn update_colors(
+pub fn update_brightness(
     spectrum: Vec<f32>,
     hz_per_bin: u32,
     min_freq: u16,
     max_freq: u16,
-    colors: &mut [Hwb],
+    brightness: &mut [f32],
     prev_max: &mut [f32],
     speed: &mut [f32],
 ) {
-    let n_panels = colors.len();
+    let n_panels = brightness.len();
     let (min_freq, max_freq) = (min_freq as f32, max_freq as f32);
     let multiplier = (max_freq / min_freq).powf(1.0 / n_panels as f32);
     let (mut intervals, mut cutoff) = (Vec::new(), min_freq);
@@ -108,13 +110,24 @@ pub fn update_colors(
         let cur_freq = (i as u32) * hz_per_bin + hz_per_bin / 2;
         if cur_freq > intervals[cur_interval] || i == n_bins - 1 {
             let ampl_delta = cur_max - prev_max[cur_interval];
-            if ampl_delta.is_sign_positive() {
-                speed[cur_interval] = -rate_func_inc(ampl_delta);
+            if ampl_delta > 0.0 {
+                // Audio getting louder → increase brightness
+                speed[cur_interval] = rate_func_inc(ampl_delta);
+            } else if cur_max > 0.01 {
+                // Audio getting quieter but still present → normal decay
+                speed[cur_interval] = -(rate_func_dec(-ampl_delta).max(0.01));
             } else {
-                speed[cur_interval] = rate_func_dec(-ampl_delta).max(1e-4);
+                // Audio is essentially silent → strong decay so panels actually go dark
+                // Without this, the tiny 1e-4 floor makes panels take minutes to fade out
+                speed[cur_interval] = -(0.15_f32.max(brightness[cur_interval] * 0.3));
             }
-            colors[cur_interval].blackness =
-                (colors[cur_interval].blackness + speed[cur_interval]).clamp(0.0, 1.0);
+            brightness[cur_interval] =
+                (brightness[cur_interval] + speed[cur_interval]).clamp(0.0, 1.0);
+
+            // Floor very small values to true zero so panels go fully dark
+            if brightness[cur_interval] < 0.005 {
+                brightness[cur_interval] = 0.0;
+            }
 
             prev_max[cur_interval] = cur_max;
             cur_max = 0.0;
@@ -125,4 +138,165 @@ pub fn update_colors(
         }
         cur_max = cur_max.max(utils::equalize(ampl, cur_freq).min(1.0));
     }
+}
+
+/// Updates per-panel brightness using an energy wave / cascade animation.
+///
+/// Instead of each panel independently tracking a frequency band (like `update_brightness`),
+/// this effect creates a traveling wave of light across the panels:
+///
+/// 1. Compute overall audio energy from the full spectrum (max equalized amplitude).
+/// 2. Cascade: shift each panel's brightness to the next panel (with per-step decay).
+/// 3. Feed new energy into the first panel with smooth attack/decay.
+///
+/// The result is a flowing ripple of light that propagates across panels,
+/// with intensity driven by audio amplitude. Visually very different from the
+/// per-band spectrum effect.
+///
+/// # Arguments
+///
+/// * `spectrum` - FFT-derived amplitudes for frequency bins.
+/// * `hz_per_bin` - Frequency resolution (Hz per bin in spectrum).
+/// * `min_freq`/`max_freq` - Frequency range to consider.
+/// * `brightness` - Mutable slice of brightness multipliers [0,1] per panel (mutated).
+/// * `prev_max` - Previous overall energy for delta computation (only index 0 used).
+/// * `speed` - Velocity accumulator for the lead panel's brightness (only index 0 used).
+pub fn update_brightness_wave(
+    spectrum: Vec<f32>,
+    hz_per_bin: u32,
+    min_freq: u16,
+    max_freq: u16,
+    brightness: &mut [f32],
+    prev_max: &mut [f32],
+    speed: &mut [f32],
+) {
+    let n_panels = brightness.len();
+    if n_panels == 0 {
+        return;
+    }
+    let (min_freq, max_freq) = (min_freq as u32, max_freq as u32);
+
+    // 1. Compute overall audio energy: max equalized amplitude in the frequency range
+    let mut overall_energy = 0.0_f32;
+    for (i, &ampl) in spectrum.iter().enumerate() {
+        let cur_freq = (i as u32) * hz_per_bin + hz_per_bin / 2;
+        if cur_freq < min_freq {
+            continue;
+        }
+        if cur_freq > max_freq {
+            break;
+        }
+        overall_energy = overall_energy.max(utils::equalize(ampl, cur_freq).min(1.0));
+    }
+
+    // 2. Cascade: shift brightness values from left to right with per-step decay
+    // This creates the traveling wave — each panel inherits its left neighbor's value
+    let cascade_decay = 0.92;
+    for i in (1..n_panels).rev() {
+        brightness[i] = brightness[i - 1] * cascade_decay;
+    }
+
+    // 3. Feed new energy into the lead panel (index 0) with smooth attack/decay
+    let rate_func_inc = |x: f32| -> f32 { 1.0 - (1.0 - x).powi(3) };
+    let rate_func_dec = |x: f32| -> f32 { 0.9 * (1.0 - (1.0 - x).powi(4)) };
+
+    let energy_delta = overall_energy - prev_max[0];
+    if energy_delta > 0.0 {
+        speed[0] = rate_func_inc(energy_delta);
+    } else if overall_energy > 0.01 {
+        // Audio getting quieter but still present → normal decay
+        speed[0] = -(rate_func_dec(-energy_delta).max(0.01));
+    } else {
+        // Audio is essentially silent → strong decay so panels actually go dark
+        speed[0] = -(0.15_f32.max(brightness[0] * 0.3));
+    }
+    brightness[0] = (brightness[0] + speed[0]).clamp(0.0, 1.0);
+    prev_max[0] = overall_energy;
+
+    // Floor very small values to true zero so panels go fully dark
+    for b in brightness.iter_mut() {
+        if *b < 0.005 {
+            *b = 0.0;
+        }
+    }
+}
+
+/// Updates all panels with a unified beat-reactive pulse animation.
+///
+/// All panels flash together on audio transients (beats, hits, kicks) and
+/// fade quickly between them. The music's own rhythm drives the animation —
+/// no fixed-rate oscillation.
+///
+/// Uses asymmetric attack/decay with signal boost:
+/// - **Boost**: `sqrt(energy)` expands the dynamic range so moderate audio
+///   levels (0.25 → 0.5, 0.5 → 0.71) still produce visible flashes.
+/// - **Attack**: When boosted energy exceeds current brightness, snap to it
+///   almost instantly (90% of the gap per frame). Every kick/snare/transient
+///   produces an immediate flash.
+/// - **Decay**: When energy drops, brightness decays exponentially (×0.72
+///   per frame ≈ 250ms to half-brightness at 5.3 fps). The fast falloff
+///   creates strong contrast between beats — panels go noticeably dark
+///   before the next hit lands.
+///
+/// State layout:
+/// - `prev_max[0]`: current display brightness level (smoothed)
+///
+/// # Arguments
+///
+/// * `spectrum` - FFT-derived amplitudes for frequency bins.
+/// * `hz_per_bin` - Frequency resolution (Hz per bin in spectrum).
+/// * `min_freq`/`max_freq` - Frequency range to consider.
+/// * `brightness` - Mutable slice of brightness multipliers [0,1] per panel (all set to same value).
+/// * `prev_max` - Index 0 stores the current pulse brightness across frames.
+/// * `speed` - Unused by this effect (reserved for compatibility).
+pub fn update_brightness_pulse(
+    spectrum: Vec<f32>,
+    hz_per_bin: u32,
+    min_freq: u16,
+    max_freq: u16,
+    brightness: &mut [f32],
+    prev_max: &mut [f32],
+    _speed: &mut [f32],
+) {
+    if brightness.is_empty() {
+        return;
+    }
+    let (min_freq, max_freq) = (min_freq as u32, max_freq as u32);
+
+    // 1. Compute overall audio energy: max equalized amplitude in the frequency range
+    let mut overall_energy = 0.0_f32;
+    for (i, &ampl) in spectrum.iter().enumerate() {
+        let cur_freq = (i as u32) * hz_per_bin + hz_per_bin / 2;
+        if cur_freq < min_freq {
+            continue;
+        }
+        if cur_freq > max_freq {
+            break;
+        }
+        overall_energy = overall_energy.max(utils::equalize(ampl, cur_freq).min(1.0));
+    }
+
+    // 2. Boost signal: sqrt expands the dynamic range so moderate levels produce visible pulses
+    //    Without this, typical music energy (0.2-0.5) barely lights the panels
+    let boosted = overall_energy.sqrt();
+
+    // 3. Asymmetric attack/decay for punchy beat-reactive pulse
+    if boosted > prev_max[0] {
+        // Near-instant attack: snap 90% of the gap per frame
+        // Every transient produces an immediate flash
+        prev_max[0] += 0.9 * (boosted - prev_max[0]);
+    } else {
+        // Fast exponential decay between beats
+        // 0.72 per frame at ~5.3 fps ≈ 250ms to half-brightness
+        // Creates strong contrast so the next beat has real impact
+        prev_max[0] *= 0.72;
+    }
+
+    // Floor very small values to true zero so panels go fully dark
+    if prev_max[0] < 0.005 {
+        prev_max[0] = 0.0;
+    }
+
+    // 4. All panels pulse together at the same brightness
+    brightness.fill(prev_max[0]);
 }

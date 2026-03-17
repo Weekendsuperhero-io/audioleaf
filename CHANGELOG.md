@@ -4,6 +4,44 @@ All notable changes to this fork of audioleaf are documented in this file.
 
 This fork focuses on macOS compatibility, support for all Nanoleaf device types, and enhanced color palette features.
 
+## [3.5.0] - 2026-03-17
+
+### Added
+
+- **Album art visualizer**: Press `N` in the visualizer view to extract colors from the currently playing track's album artwork
+  - Spotify: artwork URL fetched via ScriptingBridge (`SBApplication`), downloaded via reqwest
+  - Apple Music: raw artwork bytes read directly from `MusicArtwork.rawData` via ScriptingBridge
+  - Falls back to osascript if ScriptingBridge is unavailable
+  - Apple Music osascript fallback uses iTunes Search API for artwork URL
+  - Background watcher thread polls every 3 seconds and auto-updates colors on song change
+  - Press any number key (`1`-`0`) to switch back to a named palette and stop the watcher
+
+- **Now playing display in TUI**: Visualizer view shows track title and color swatches
+  - "Now playing: *track title*" line appears when album art mode is active
+  - Color swatch bar shows the active palette colors as colored blocks
+  - Both update automatically when the watcher detects a song change
+  - Shared state between watcher thread and TUI via `Arc<Mutex<VizState>>`
+
+- **Universal macOS binary**: Build a fat binary supporting both Intel and Apple Silicon
+  - `make universal` runs `cargo build` for both `x86_64-apple-darwin` and `aarch64-apple-darwin`, then combines with `lipo`
+  - CI updated to build universal binary on macOS runners
+  - `make build` for single-arch release, `make clean` for cleanup
+
+- **Pre-commit hook**: `.githooks/pre-commit` runs `cargo fmt --check` and `cargo clippy -D warnings`
+  - Activate with `git config core.hooksPath .githooks`
+  - Prevents formatting and lint issues from reaching CI
+
+### Changed
+
+- **Even color distribution across panels**: `colors_from_rgb` now spreads palette colors evenly instead of padding with the last color
+  - 4 colors across 12 panels: each color covers 3 panels (was 1-1-1-9)
+  - Works correctly for all palette sizes
+
+- **Color extraction**: Switched from `color-thief` to `auto-palette` crate
+  - Native Oklch color space support (`to_oklch()`, `lightness()`, `is_dark()`)
+  - Extracts the 4 most dominant colors sorted by pixel population
+  - Filters out near-black colors using Oklch lightness (`l > 0.15`) since they can't be represented on LED panels
+
 ## [3.2.0] - 2025-12-05
 
 ### Added

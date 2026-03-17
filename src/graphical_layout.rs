@@ -1,7 +1,7 @@
 use crate::layout_visualizer::PanelInfo;
 use crate::nanoleaf::NlDevice;
 use macroquad::prelude::*;
-use palette::Hwb;
+use palette::Oklch;
 use std::f32::consts::PI;
 use std::thread;
 use std::time::Duration;
@@ -146,7 +146,16 @@ async fn visualize_loop(panels: Vec<PanelInfo>, global_orientation: u16, device:
     // Initialize optional UDP controller using device IP and token for flashing panels.
     // Gracefully handles initialization failure by disabling clicks but continuing render.
     let nl_controller = match crate::nanoleaf::NlUdp::new(&device) {
-        Ok(controller) => Some(controller),
+        Ok(controller) => {
+            // Blank all panels to black so only clicked panels light up
+            let black_colors: Vec<Oklch> = panels
+                .iter()
+                .filter(|p| p.shape_type.side_length >= 1.0)
+                .map(|_| Oklch::new(0.0, 0.0, 0.0))
+                .collect();
+            let _ = controller.update_panels(&black_colors, 0);
+            Some(controller)
+        }
         Err(e) => {
             eprintln!("Warning: Could not initialize Nanoleaf controller: {}", e);
             None
@@ -504,7 +513,7 @@ fn draw_panel(
 
 /// Flashes a specific panel white briefly by sending UDP color updates.
 ///
-/// Sets the clicked panel to white (Hwb(359,0,0)) and all other light panels to black (Hwb(0,0,1)).
+/// Sets the clicked panel to white (Oklch L=1, C=0) and all other light panels to black (Oklch L=0, C=0).
 /// Updates immediately (transition=1), waits 300ms, then sets all light panels back to black.
 ///
 /// Only affects panels with side_length >=1.0 (light panels, skips controllers).
@@ -519,16 +528,16 @@ fn flash_panel(
     all_panels: &[PanelInfo],
     clicked_panel_id: u16,
 ) {
-    // Construct per-panel Hwb colors for UDP update: white (Hwb::new(359.0, 0.0, 0.0)) for clicked,
-    // black (Hwb::new(0.0, 0.0, 1.0)) for other light panels; exclude controllers from array.
-    let colors: Vec<Hwb> = all_panels
+    // Construct per-panel Oklch colors for UDP update: white (L=1, C=0) for clicked,
+    // black (L=0, C=0) for other light panels; exclude controllers from array.
+    let colors: Vec<Oklch> = all_panels
         .iter()
         .filter(|panel| panel.shape_type.side_length >= 1.0)
         .map(|panel| {
             if panel.panel_id == clicked_panel_id {
-                Hwb::new(359.0, 0.0, 0.0) // White
+                Oklch::new(1.0, 0.0, 0.0) // White
             } else {
-                Hwb::new(0.0, 0.0, 1.0) // Black
+                Oklch::new(0.0, 0.0, 0.0) // Black
             }
         })
         .collect();
@@ -540,11 +549,10 @@ fn flash_panel(
     thread::sleep(Duration::from_millis(300));
 
     // Reset flash: update all light panels to black, effectively turning off the highlight
-    // (note: this overrides any current effect; in practice, may need to restore original colors for seamless integration).
-    let black_colors: Vec<Hwb> = all_panels
+    let black_colors: Vec<Oklch> = all_panels
         .iter()
         .filter(|panel| panel.shape_type.side_length >= 1.0)
-        .map(|_| Hwb::new(0.0, 0.0, 1.0))
+        .map(|_| Oklch::new(0.0, 0.0, 0.0))
         .collect();
     let _ = controller.update_panels(&black_colors, 1);
 }

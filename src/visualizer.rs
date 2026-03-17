@@ -1,13 +1,14 @@
 use crate::{
     audio::AudioStream,
-    config::VisualizerConfig,
+    config::{Effect, VisualizerConfig},
     constants,
     nanoleaf::{self, NlDevice, NlUdp},
     panic, processing, utils,
 };
 use anyhow::Result;
-use cpal::{traits::*, InputCallbackInfo, SampleFormat, SizedSample};
+use cpal::{InputCallbackInfo, SampleFormat, SizedSample, traits::*};
 use dasp_sample::conv::ToSample;
+use palette::Oklch;
 use std::{
     sync::mpsc::{self, TryRecvError},
     thread,
@@ -27,7 +28,9 @@ pub enum VisualizerMsg {
     Resume,
     End,
     SetGain(f32),
-    SetPalette(Vec<u16>),
+    SetPalette(Vec<[u8; 3]>),
+    SetEffect(Effect),
+    ResetPanels,
     SetSorting {
         primary_axis: crate::config::Axis,
         sort_primary: crate::config::Sort,
@@ -38,14 +41,16 @@ pub enum VisualizerMsg {
 
 pub struct Visualizer {
     state: VisualizerState,
+    nl_device: NlDevice,
     nl_udp: NlUdp,
     audio_stream: AudioStream,
     gain: f32,
     time_window: f32,
-    trans_time: i16,
+    trans_time: u16,
     min_freq: u16,
     max_freq: u16,
-    hues: Vec<u16>,
+    hues: Vec<[u8; 3]>,
+    effect: Effect,
 }
 
 impl Visualizer {
@@ -94,9 +99,13 @@ impl Visualizer {
             .transition_time
             .unwrap_or(constants::DEFAULT_TRANSITION_TIME);
         let (min_freq, max_freq) = config.freq_range.unwrap_or(constants::DEFAULT_FREQ_RANGE);
-        let hues = config.hues.unwrap_or(Vec::from(constants::DEFAULT_HUES));
+        let hues = config
+            .colors
+            .unwrap_or(Vec::from(constants::DEFAULT_COLORS));
+        let effect = config.effect.unwrap_or_default();
         Ok(Visualizer {
             state,
+            nl_device: nl_device.clone(),
             nl_udp,
             audio_stream,
             gain,
@@ -105,28 +114,67 @@ impl Visualizer {
             min_freq,
             max_freq,
             hues,
+            effect,
         })
+    }
+
+    /// Sends a UDP frame setting all panels to black with instant transition.
+    ///
+    /// Used when starting the visualizer or changing effects/palettes to clear
+    /// any lingering colors from the previous state before the new effect begins.
+    fn send_black_frame(&self, n_panels: usize) {
+        let black = vec![Oklch::new(0.0, 0.0, 0.0); n_panels];
+        let _ = self.nl_udp.update_panels(&black, 0);
     }
 
     /// Updates visualizer internal state or parameters based on received message.
     ///
     /// Dispatched in processing thread loop.
-    /// Modifies self fields and/or regenerates `colors` vector from hues.
+    /// Modifies self fields and/or regenerates `base_colors` vector from hues.
+    /// When palette or sorting changes, brightness is reset to 0 so panels start dark.
     /// For SetSorting, updates UDP panel order with orientation.
     ///
     /// # Arguments
     ///
     /// * `event` - Control message type.
-    /// * `colors` - Mutable reference to current HWB color array for panels (updated if palette/sort changes).
-    fn update_state(&mut self, event: VisualizerMsg, colors: &mut Vec<palette::Hwb>) {
+    /// * `base_colors` - Mutable reference to base Oklch colors with original lightness (updated if palette/sort changes).
+    /// * `brightness` - Mutable reference to per-panel brightness multipliers (reset on palette/sort changes).
+    /// * `prev_max` - Mutable reference to previous max amplitudes (reset on effect change).
+    /// * `speed` - Mutable reference to velocity/phase accumulators (reset on effect change).
+    fn update_state(
+        &mut self,
+        event: VisualizerMsg,
+        base_colors: &mut Vec<Oklch>,
+        brightness: &mut Vec<f32>,
+        prev_max: &mut [f32],
+        speed: &mut [f32],
+    ) {
         match event {
             VisualizerMsg::Resume => self.state = VisualizerState::Running,
             VisualizerMsg::Pause => self.state = VisualizerState::Paused,
             VisualizerMsg::End => self.state = VisualizerState::Done,
             VisualizerMsg::SetGain(gain) => self.gain = gain,
-            VisualizerMsg::SetPalette(hues) => {
-                self.hues = hues;
-                *colors = utils::colors_from_hues(&self.hues, colors.len());
+            VisualizerMsg::SetEffect(effect) => {
+                self.effect = effect;
+                brightness.fill(0.0);
+                // Reset state arrays — each effect uses prev_max/speed differently
+                prev_max.fill(0.0);
+                speed.fill(0.0);
+                // Immediately send a black frame so the old effect's colors don't linger
+                self.send_black_frame(base_colors.len());
+            }
+            VisualizerMsg::SetPalette(new_colors) => {
+                self.hues = new_colors;
+                *base_colors = utils::colors_from_rgb(&self.hues, base_colors.len());
+                brightness.fill(0.0);
+                // Immediately send a black frame so the old palette's colors don't linger
+                self.send_black_frame(base_colors.len());
+            }
+            VisualizerMsg::ResetPanels => {
+                brightness.fill(0.0);
+                prev_max.fill(0.0);
+                speed.fill(0.0);
+                self.send_black_frame(base_colors.len());
             }
             VisualizerMsg::SetSorting {
                 primary_axis,
@@ -140,7 +188,11 @@ impl Visualizer {
                     Some(sort_secondary),
                     global_orientation,
                 );
-                *colors = utils::colors_from_hues(&self.hues, self.nl_udp.panels.len());
+                *base_colors = utils::colors_from_rgb(&self.hues, self.nl_udp.panels.len());
+                brightness.resize(base_colors.len(), 0.0);
+                brightness.fill(0.0);
+                // Immediately send a black frame so the old sort order's colors don't linger
+                self.send_black_frame(base_colors.len());
             }
         }
     }
@@ -192,8 +244,10 @@ impl Visualizer {
     /// Spawns thread that:
     /// - Registers panic handler.
     /// - Loops receiving audio samples and control messages.
-    /// - Processes FFT spectrum, updates colors with gain/time_window/equalize.
-    /// - Applies sorting and sends HWB colors to panels via UDP with transition time.
+    /// - Processes FFT spectrum, updates per-panel brightness multiplier [0,1] from audio.
+    /// - Computes display colors: for each panel, scales base Oklch lightness by brightness,
+    ///   so at peak audio the output exactly matches the user's original RGB palette color.
+    /// - Sends display colors to panels via UDP with transition time.
     /// - Handles pause/resume/end states.
     ///
     /// Returns sender for sending `VisualizerMsg` to control runtime behavior.
@@ -236,19 +290,37 @@ impl Visualizer {
             stream.play().expect("running the audio stream failed");
 
             let n = self.nl_udp.panels.len();
-            let sample_rate = self.audio_stream.stream_config.sample_rate.0;
-            let mut colors = utils::colors_from_hues(&self.hues, n);
+            let sample_rate = self.audio_stream.stream_config.sample_rate;
+            // Base colors hold the target Oklch values (with original lightness from the user's RGB)
+            let mut base_colors = utils::colors_from_rgb(&self.hues, n);
+            // Brightness multiplier [0,1] per panel — animated by audio amplitude
+            // At 0 the panel is black; at 1 it shows the exact target color
+            let mut brightness = vec![0.0_f32; n];
             let mut prev_max = vec![0.0; n];
             let mut speed = vec![0.0; n];
+            // Clear any colors left over from a previous Nanoleaf scene or effect
+            self.send_black_frame(n);
             loop {
                 match self.state {
                     VisualizerState::Done => break,
                     VisualizerState::Paused => {
                         let event = rx_events.recv().expect("events sender disconnected");
-                        self.update_state(event, &mut colors);
+                        self.update_state(
+                            event,
+                            &mut base_colors,
+                            &mut brightness,
+                            &mut prev_max,
+                            &mut speed,
+                        );
                     }
                     VisualizerState::Running => match rx_events.try_recv() {
-                        Ok(event) => self.update_state(event, &mut colors),
+                        Ok(event) => self.update_state(
+                            event,
+                            &mut base_colors,
+                            &mut brightness,
+                            &mut prev_max,
+                            &mut speed,
+                        ),
                         Err(err) => {
                             if err == TryRecvError::Disconnected {
                                 panic!("events sender disconnected");
@@ -264,18 +336,52 @@ impl Visualizer {
                 }
                 let spectrum = processing::process(samples, self.gain);
                 let hz_per_bin = (sample_rate / 2) / (spectrum.len() as u32);
-                processing::update_colors(
-                    spectrum,
-                    hz_per_bin,
-                    self.min_freq,
-                    self.max_freq,
-                    &mut colors,
-                    &mut prev_max,
-                    &mut speed,
-                );
-                self.nl_udp
-                    .update_panels(&colors, self.trans_time)
-                    .expect("updating panels failed");
+                match self.effect {
+                    Effect::Spectrum => processing::update_brightness(
+                        spectrum,
+                        hz_per_bin,
+                        self.min_freq,
+                        self.max_freq,
+                        &mut brightness,
+                        &mut prev_max,
+                        &mut speed,
+                    ),
+                    Effect::EnergyWave => processing::update_brightness_wave(
+                        spectrum,
+                        hz_per_bin,
+                        self.min_freq,
+                        self.max_freq,
+                        &mut brightness,
+                        &mut prev_max,
+                        &mut speed,
+                    ),
+                    Effect::Pulse => processing::update_brightness_pulse(
+                        spectrum,
+                        hz_per_bin,
+                        self.min_freq,
+                        self.max_freq,
+                        &mut brightness,
+                        &mut prev_max,
+                        &mut speed,
+                    ),
+                }
+                // Compute display colors: scale base lightness by brightness multiplier
+                // This ensures at brightness=1.0, the output exactly matches the user's original RGB
+                let display_colors: Vec<Oklch> = base_colors
+                    .iter()
+                    .zip(brightness.iter())
+                    .map(|(base, &b)| Oklch::new(base.l * b, base.chroma, base.hue))
+                    .collect();
+                if self
+                    .nl_udp
+                    .update_panels(&display_colors, self.trans_time)
+                    .is_err()
+                {
+                    // UDP send failed (e.g. extControl timed out) — re-request and retry once
+                    if self.nl_device.request_udp_control().is_ok() {
+                        let _ = self.nl_udp.update_panels(&display_colors, self.trans_time);
+                    }
+                }
             }
         });
 
