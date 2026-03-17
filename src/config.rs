@@ -1,5 +1,5 @@
 use crate::{constants, ssdp, utils};
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 use clap::Parser;
 use serde::Serialize;
 use std::fs::File;
@@ -85,17 +85,36 @@ pub enum Sort {
     Desc,
 }
 
+/// Visual effect mode for the audio visualizer.
+///
+/// Controls how audio data maps to panel brightness/color animation.
+#[derive(Copy, Clone, Debug, Default, Serialize)]
+pub enum Effect {
+    /// Each panel independently tracks a logarithmic frequency band.
+    /// Brightness pulses with audio energy in that band (fast attack, slow decay).
+    #[default]
+    Spectrum,
+    /// Audio energy enters from one end and cascades across panels as a traveling wave.
+    /// Creates a flowing ripple effect driven by overall audio amplitude.
+    EnergyWave,
+    /// All panels pulse together, driven directly by audio transients.
+    /// Very fast attack snaps to each beat; smooth exponential decay fades between hits.
+    /// The music's own rhythm drives the animation — no fixed oscillation.
+    Pulse,
+}
+
 #[derive(Debug, Serialize)]
 pub struct VisualizerConfig {
     pub audio_backend: Option<String>,
     pub freq_range: Option<(u16, u16)>,
-    pub hues: Option<Vec<u16>>,
+    pub colors: Option<Vec<[u8; 3]>>,
     pub default_gain: Option<f32>,
-    pub transition_time: Option<i16>,
+    pub transition_time: Option<u16>,
     pub time_window: Option<f32>,
     pub primary_axis: Option<Axis>,
     pub sort_primary: Option<Sort>,
     pub sort_secondary: Option<Sort>,
+    pub effect: Option<Effect>,
 }
 
 impl VisualizerConfig {
@@ -104,7 +123,7 @@ impl VisualizerConfig {
     /// Initializes with constants:
     /// - `audio_backend`: "default"
     /// - `freq_range`: (20, 4500) Hz
-    /// - `hues`: Standard rainbow-like [30,0,330,...]
+    /// - `colors`: RGB color array for panel visualization
     /// - `default_gain`: 1.0
     /// - `transition_time`: 2 (200ms)
     /// - `time_window`: 0.1875 s
@@ -113,13 +132,22 @@ impl VisualizerConfig {
         VisualizerConfig {
             audio_backend: Some("default".to_string()),
             freq_range: Some(constants::DEFAULT_FREQ_RANGE),
-            hues: Some(vec![30, 0, 330, 300, 270, 240, 210]),
+            colors: Some(vec![
+                [255, 128, 0],
+                [255, 0, 0],
+                [255, 0, 128],
+                [255, 0, 255],
+                [128, 0, 255],
+                [0, 0, 255],
+                [0, 128, 255],
+            ]),
             default_gain: Some(constants::DEFAULT_GAIN),
             transition_time: Some(constants::DEFAULT_TRANSITION_TIME),
             time_window: Some(constants::DEFAULT_TIME_WINDOW),
             primary_axis: Some(Axis::default()),
             sort_primary: Some(Sort::default()),
             sort_secondary: Some(Sort::default()),
+            effect: Some(Effect::default()),
         }
     }
 }
@@ -186,14 +214,14 @@ impl Config {
     /// Supports comprehensive field validation and type conversion:
     /// - `audio_backend`: String for device name.
     /// - `freq_range`: 2-element array of u16 [min_hz, max_hz].
-    /// - `hues`: Array of u16 (0-360) or string name of predefined palette (e.g., "ocean-nightclub").
+    /// - `colors`: Array of [R,G,B] triplets or string name of predefined palette (e.g., "ocean-nightclub").
     /// - `default_gain`: f32 or i64, applied to spectrum amplitudes.
-    /// - `transition_time`: i16 (-1 for instant, positive in 100ms units for Nanoleaf transitions).
+    /// - `transition_time`: u16 in 100ms units for Nanoleaf transitions (0 = instant).
     /// - `time_window`: f32 seconds for smoothing window.
     /// - `primary_axis`: "X" or "Y" enum.
     /// - `sort_primary`/`sort_secondary`: "Asc" or "Desc".
     ///
-    /// Validates ranges (e.g., hues 0-360, transition_time >= -1) and bails on errors or unknown keys.
+    /// Validates ranges (e.g., RGB 0-255, transition_time >= 0) and bails on errors or unknown keys.
     /// Palette names checked against available predefined palettes.
     ///
     /// # Arguments
@@ -223,10 +251,10 @@ impl Config {
                     visualizer_config.freq_range =
                         Some((u16::try_from(low)?, u16::try_from(high)?));
                 }
-                ("hues", Value::String(s)) => {
+                ("colors" | "hues", Value::String(s)) => {
                     // Named palette support
                     match crate::palettes::get_palette(&s) {
-                        Some(hues) => visualizer_config.hues = Some(hues),
+                        Some(colors) => visualizer_config.colors = Some(colors),
                         None => {
                             let available = crate::palettes::get_palette_names().join(", ");
                             bail!(
@@ -237,21 +265,55 @@ impl Config {
                         }
                     }
                 }
-                ("hues", Value::Array(v)) => {
+                ("colors" | "hues", Value::Array(v)) => {
                     if v.is_empty() {
-                        bail!("hues cannot be an empty array");
+                        bail!("colors cannot be an empty array");
                     }
-                    if v.iter().map(|x| x.as_integer()).any(|x| match x.as_ref() {
-                        Some(x) => !(0..=360).contains(x),
-                        None => true,
-                    }) {
-                        bail!("hues must be integers from 0 to 360 inclusive (360 = white)");
+                    // Detect format: if first element is an integer, treat as legacy hue array;
+                    // if first element is an array, treat as RGB color array.
+                    if v[0].is_integer() {
+                        // Legacy hue format: [30, 0, 330, ...] → convert HSV hues to RGB
+                        let mut colors = Vec::with_capacity(v.len());
+                        for (i, entry) in v.iter().enumerate() {
+                            let Some(hue_val) = entry.as_integer() else {
+                                bail!("hues[{}] must be an integer (0-360)", i);
+                            };
+                            if !(0..=360).contains(&hue_val) {
+                                bail!("hues[{}] must be 0-360, got {}", i, hue_val);
+                            }
+                            if hue_val == 360 {
+                                colors.push([255, 255, 255]); // white
+                            } else {
+                                // Convert HSV hue (S=1, V=1) to RGB
+                                let rgb = hsv_hue_to_rgb(hue_val as f32);
+                                colors.push(rgb);
+                            }
+                        }
+                        visualizer_config.colors = Some(colors);
+                    } else {
+                        // New RGB format: [[255, 0, 0], [0, 255, 0], ...]
+                        let mut colors = Vec::with_capacity(v.len());
+                        for (i, entry) in v.iter().enumerate() {
+                            let Some(rgb_arr) = entry.as_array() else {
+                                bail!("colors[{}] must be a [R, G, B] array", i);
+                            };
+                            if rgb_arr.len() != 3 {
+                                bail!("colors[{}] must be a 3-element [R, G, B] array", i);
+                            }
+                            let mut rgb = [0u8; 3];
+                            for (j, component) in rgb_arr.iter().enumerate() {
+                                let Some(val) = component.as_integer() else {
+                                    bail!("colors[{}][{}] must be an integer (0-255)", i, j);
+                                };
+                                if !(0..=255).contains(&val) {
+                                    bail!("colors[{}][{}] must be 0-255, got {}", i, j, val);
+                                }
+                                rgb[j] = val as u8;
+                            }
+                            colors.push(rgb);
+                        }
+                        visualizer_config.colors = Some(colors);
                     }
-                    let hues: Vec<u16> = v
-                        .into_iter()
-                        .map(|x| u16::try_from(x.as_integer().unwrap()).unwrap())
-                        .collect();
-                    visualizer_config.hues = Some(hues);
                 }
                 ("default_gain", Value::Float(x)) => {
                     eprintln!("DEBUG: Parsed default_gain as Float: {}", x);
@@ -262,10 +324,11 @@ impl Config {
                     visualizer_config.default_gain = Some(x as f32);
                 }
                 ("transition_time", Value::Integer(x)) => {
-                    let trans_time = i16::try_from(x)?;
-                    if trans_time < -1 {
-                        bail!("transition_time must be -1 (instant) or a positive value. Note: units are in 100ms (1 = 100ms, 2 = 200ms, etc.)");
-                    }
+                    let trans_time = u16::try_from(x).map_err(|_| {
+                        anyhow::anyhow!(
+                            "transition_time must be 0-65535. Note: units are in 100ms (0 = instant, 1 = 100ms, 2 = 200ms, etc.)"
+                        )
+                    })?;
                     visualizer_config.transition_time = Some(trans_time);
                 }
                 ("time_window", Value::Float(x)) => {
@@ -303,6 +366,21 @@ impl Config {
                         bail!("sort must be `Asc` (ascending) or `Desc` (descending)");
                     };
                     visualizer_config.sort_secondary = sort;
+                }
+                ("effect", Value::String(s)) => {
+                    let effect = match s.as_str() {
+                        "Spectrum" | "spectrum" => Some(Effect::Spectrum),
+                        "EnergyWave" | "energy_wave" | "energy-wave" => Some(Effect::EnergyWave),
+                        "Pulse" | "pulse" => Some(Effect::Pulse),
+                        _ => None,
+                    };
+                    if effect.is_none() {
+                        bail!(
+                            "effect must be `Spectrum`, `EnergyWave`, or `Pulse`, got `{}`",
+                            s
+                        );
+                    };
+                    visualizer_config.effect = effect;
                 }
                 (key, _) => {
                     bail!(format!("invalid key `{}`", key));
@@ -444,6 +522,24 @@ pub fn resolve_paths(
         (config_file_path, config_file_exists),
         (devices_file_path, devices_file_exists),
     ))
+}
+
+/// Converts an HSV hue (with S=1, V=1) to an RGB triplet.
+///
+/// Used for backwards compatibility with legacy config files that specify
+/// colors as hue angles (0-360) instead of RGB arrays.
+fn hsv_hue_to_rgb(hue: f32) -> [u8; 3] {
+    let h = hue / 60.0;
+    let x = 1.0 - (h % 2.0 - 1.0).abs();
+    let (r, g, b) = match h as u32 {
+        0 => (1.0, x, 0.0),
+        1 => (x, 1.0, 0.0),
+        2 => (0.0, 1.0, x),
+        3 => (0.0, x, 1.0),
+        4 => (x, 0.0, 1.0),
+        _ => (1.0, 0.0, x),
+    };
+    [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]
 }
 
 /// Interactively discovers Nanoleaf devices via SSDP or accepts manual IP input.

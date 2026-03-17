@@ -1,34 +1,40 @@
 [package]
 name = "audioleaf"
-version = "3.3.0"
-edition = "2021"
+version = "3.5.0"
+edition = "2024"
 authors = ["Antoni Zasada", "weekendsuperhero"]
 description = "Manage your Nanoleaf devices (Canvas, Shapes, Elements, Light Panels) and visualize music straight from the terminal"
-keywords = ["nanoleaf", "audio", "music", "visualizer"]
+keywords = ["audio", "music", "nanoleaf", "visualizer"]
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/weekendsuperhero/audioleaf"
+repository = "https://github.com/weekendsuperhero-io/audioleaf"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-anyhow = "1.0.86"
-clap = { version = "4.5.16", features = ["derive"] }
-cpal = "0.16.0"
+anyhow = "1.0.102"
+clap = { version = "4.6.0", features = ["derive"] }
+auto-palette = "0.9"
+cpal = "0.17.3"
 dasp_sample = "0.11.0"
 dirs = "6.0.0"
 macroquad = "0.4"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
 num-complex = "0.4.6"
 palette = "0.7.6"
 pollster = "0.4"
-ratatui = "0.29.0"
-reqwest = { version = "0.12.24", features = ["blocking", "json"] }
-serde = { version = "1.0.228", features = ["derive"] }
-serde_json = "1.0.145"
-toml = "0.9.8"
+ratatui = "0.30"
+reqwest = { version = "0.13", features = ["blocking", "json"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
 
-[profile.release]
-panic = "abort"
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", features = ["NSString", "NSData"] }
 
 [profile.dev]
+panic = "abort"
+
+[profile.release]
 panic = "abort"

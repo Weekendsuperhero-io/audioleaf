@@ -1,6 +1,6 @@
 use crate::constants;
-use anyhow::{bail, Result};
-use cpal::{traits::*, Device, SampleFormat, StreamConfig};
+use anyhow::{Result, bail};
+use cpal::{Device, SampleFormat, StreamConfig, traits::*};
 
 pub struct AudioStream {
     pub device: Device,
@@ -52,7 +52,7 @@ impl AudioStream {
                 let mut loopback_device = None;
                 if let Ok(devices) = host.input_devices() {
                     for device in devices {
-                        if let Ok(name) = device.name() {
+                        if let Ok(name) = device.description().map(|d| d.name().to_string()) {
                             if loopback_names.iter().any(|lb| name.contains(lb)) {
                                 eprintln!("INFO: Found loopback device: {}", name);
                                 loopback_device = Some(device);
@@ -69,9 +69,11 @@ impl AudioStream {
                     host.default_input_device()
                 })
             }
-            _ => host
-                .input_devices()?
-                .find(|x| x.name().map(|y| y == device_name).unwrap_or(false)),
+            _ => host.input_devices()?.find(|x| {
+                x.description()
+                    .map(|d| d.name() == device_name)
+                    .unwrap_or(false)
+            }),
         };
 
         let Some(device) = device else {
@@ -79,7 +81,10 @@ impl AudioStream {
                 "Audio backend `{}` not found, available options: {}",
                 device_name,
                 host.input_devices()?
-                    .map(|dev| dev.name().unwrap_or_default())
+                    .map(|dev| dev
+                        .description()
+                        .map(|d| d.name().to_string())
+                        .unwrap_or_default())
                     .collect::<Vec<_>>()
                     .join(", ")
             ));

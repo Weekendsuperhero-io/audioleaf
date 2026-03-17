@@ -9,6 +9,7 @@ mod event_handler;
 mod graphical_layout;
 mod layout_visualizer;
 mod nanoleaf;
+mod now_playing;
 mod palettes;
 mod panic;
 mod processing;
@@ -145,6 +146,8 @@ async fn handle_dump_command(
             println!("Panel Layout Information for: {}", nl_device.name);
             println!("Device IP: {}", nl_device.ip);
 
+            nl_device.ensure_device_ready()?;
+
             let layout = nl_device.get_panel_layout()?;
             let orientation = nl_device.get_global_orientation()?;
             let global_orientation = orientation["value"].as_u64().unwrap_or(0) as u16;
@@ -159,14 +162,20 @@ async fn handle_dump_command(
             println!("\n=== Raw Global Orientation JSON ===");
             println!("{}", serde_json::to_string_pretty(&orientation)?);
 
+            nl_device.set_state(Some(false), Some(0))?;
             Ok(())
         }
         config::DumpType::Palettes => {
             println!("Available Color Palettes:\n");
-            let palette_names = palettes::get_palette_names();
+            let mut palette_names = palettes::get_palette_names();
+            palette_names.sort();
             for name in palette_names {
-                let hues = palettes::get_palette(&name).unwrap();
-                println!("  {} = {:?}", name, hues);
+                let colors = palettes::get_palette(&name).unwrap();
+                let color_strs: Vec<String> = colors
+                    .iter()
+                    .map(|[r, g, b]| format!("[{}, {}, {}]", r, g, b))
+                    .collect();
+                println!("  {} = [{}]", name, color_strs.join(", "));
             }
             Ok(())
         }
@@ -197,6 +206,10 @@ async fn handle_dump_command(
                 )?
             };
 
+            nl_device.ensure_device_ready()?;
+            // Request UDP control so panel flash commands work
+            nl_device.request_udp_control()?;
+
             let layout = nl_device.get_panel_layout()?;
             let orientation = nl_device.get_global_orientation()?;
             let global_orientation = orientation["value"].as_u64().unwrap_or(0) as u16;
@@ -204,8 +217,9 @@ async fn handle_dump_command(
             let panels = layout_visualizer::parse_layout(&layout)?;
 
             // Call the graphical visualizer - it has its own macroquad::main wrapper
-            graphical_layout::visualize_graphical(panels, global_orientation, nl_device);
+            graphical_layout::visualize_graphical(panels, global_orientation, nl_device.clone());
 
+            nl_device.set_state(Some(false), Some(0))?;
             Ok(())
         }
         config::DumpType::Info => {
@@ -237,10 +251,14 @@ async fn handle_dump_command(
 
             println!("Device Information for: {}", nl_device.name);
             println!("Device IP: {}", nl_device.ip);
+
+            nl_device.ensure_device_ready()?;
+
             println!("\n=== Device Info (from /api/v1/) ===");
             let info = nl_device.get_device_info()?;
             println!("{}", serde_json::to_string_pretty(&info)?);
 
+            nl_device.set_state(Some(false), Some(0))?;
             Ok(())
         }
     }

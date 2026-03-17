@@ -2,8 +2,8 @@ use crate::{
     config::{Axis, Sort},
     constants, utils,
 };
-use anyhow::{bail, Result};
-use palette::{FromColor, Hsv, Srgb};
+use anyhow::{Result, bail};
+use palette::{FromColor, Hsv, Oklch, Srgb};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -19,7 +19,7 @@ pub struct NlEffect {
     pub palette: Vec<Srgb<u8>>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NlDevice {
     pub name: String,
     pub ip: Ipv4Addr,
@@ -219,24 +219,18 @@ impl NlDevice {
         let is_on = info["state"]["on"]["value"].as_bool().unwrap_or(true);
         let brightness = info["state"]["brightness"]["value"].as_u64().unwrap_or(100) as u8;
 
-        let mut needs_power = false;
-        let mut needs_brightness = false;
+        let needs_power = !is_on;
+        let needs_brightness = brightness != 100;
 
-        if !is_on {
+        if needs_power {
             eprintln!("Device is off. Turning on...");
-            needs_power = true;
         }
-
-        if brightness == 0 {
-            eprintln!("Device brightness is 0. Setting to 100...");
-            needs_brightness = true;
+        if needs_brightness {
+            eprintln!("Device brightness is {}. Setting to 100...", brightness);
         }
 
         if needs_power || needs_brightness {
-            self.set_state(
-                if needs_power { Some(true) } else { None },
-                if needs_brightness { Some(100) } else { None },
-            )?;
+            self.set_state(if needs_power { Some(true) } else { None }, Some(100))?;
             // Give the device a moment to respond to the state change
             std::thread::sleep(std::time::Duration::from_millis(500));
         }
@@ -528,7 +522,7 @@ impl NlUdp {
         (rotated_x, rotated_y)
     }
 
-    pub fn update_panels(&self, colors: &[palette::Hwb], trans_time: i16) -> Result<()> {
+    pub fn update_panels(&self, colors: &[Oklch], trans_time: u16) -> Result<()> {
         let mut buf = vec![0; 8 * self.panels.len() + 2];
         (buf[0], buf[1]) = utils::split_into_bytes(self.panels.len() as u16);
         for (i, color) in colors.iter().enumerate() {
@@ -537,7 +531,7 @@ impl NlUdp {
                 green: g,
                 blue: b,
                 ..
-            } = palette::Srgb::from_color(*color).into_format::<u8>();
+            } = Srgb::from_color(*color).into_format::<u8>();
             let offset = 8 * i + 2;
             (buf[offset], buf[offset + 1]) = utils::split_into_bytes(self.panels[i].id);
             (
@@ -546,14 +540,8 @@ impl NlUdp {
                 buf[offset + 4],
                 buf[offset + 5],
             ) = (r, g, b, 0);
-            // Convert i16 to bytes (supporting -1 for instant transition)
-            // trans_time is in units of 100ms: 1 = 100ms, 2 = 200ms, -1 = instant
-            let trans_time_u16 = if trans_time == -1 {
-                0xFFFF // -1 as u16 (two's complement)
-            } else {
-                trans_time as u16
-            };
-            (buf[offset + 6], buf[offset + 7]) = utils::split_into_bytes(trans_time_u16);
+            // trans_time is in units of 100ms: 0 = instant, 1 = 100ms, 2 = 200ms
+            (buf[offset + 6], buf[offset + 7]) = utils::split_into_bytes(trans_time);
         }
         self.socket.send(&buf)?;
 
