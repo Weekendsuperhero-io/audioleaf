@@ -267,10 +267,12 @@ impl Config {
                     }
                 }
                 ("default_gain", Value::Float(x)) => {
+                    #[cfg(debug_assertions)]
                     eprintln!("DEBUG: Parsed default_gain as Float: {}", x);
                     visualizer_config.default_gain = Some(x as f32);
                 }
                 ("default_gain", Value::Integer(x)) => {
+                    #[cfg(debug_assertions)]
                     eprintln!("DEBUG: Parsed default_gain as Integer: {}", x);
                     visualizer_config.default_gain = Some(x as f32);
                 }
@@ -364,10 +366,12 @@ impl Config {
     ///
     /// File I/O errors, TOML deserialization failures, or validation bails.
     pub fn parse_from_file(path: &Path) -> Result<Self> {
+        #[cfg(debug_assertions)]
         eprintln!("DEBUG: Reading config from: {}", path.display());
         let mut config_file = File::open(path)?;
         let mut contents = String::new();
         config_file.read_to_string(&mut contents)?;
+        #[cfg(debug_assertions)]
         eprintln!("DEBUG: Config file contents:\n{}", contents);
         let data = contents.parse::<Table>()?;
 

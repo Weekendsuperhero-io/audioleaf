@@ -65,6 +65,7 @@ impl App {
         let gain = visualizer_config
             .default_gain
             .unwrap_or(constants::DEFAULT_GAIN);
+        #[cfg(debug_assertions)]
         eprintln!("INFO: Starting with gain: {}", gain);
 
         let global_orientation = nl_device
@@ -141,6 +142,7 @@ impl App {
                 window_width: 1200,
                 window_height: 800,
                 window_resizable: true,
+                icon: Some(load_icon()),
                 ..Default::default()
             },
             async move {
@@ -857,4 +859,26 @@ fn sharp_text(text: &str, x: f32, y: f32, logical_size: f32, color: Color) {
 fn sharp_measure(logical_size: f32, text: &str) -> TextDimensions {
     let (fs, sx, sy) = camera_font_scale(logical_size);
     measure_text(text, None, fs, sx * (sy / sx))
+}
+
+// ── Window icon ──────────────────────────────────────────────────────────
+
+fn load_icon() -> miniquad::conf::Icon {
+    fn decode_rgba(png_bytes: &[u8], size: u32) -> Vec<u8> {
+        let img = image::load_from_memory(png_bytes)
+            .expect("embedded icon PNG is valid")
+            .resize_exact(size, size, image::imageops::FilterType::Lanczos3)
+            .into_rgba8();
+        img.into_raw()
+    }
+
+    let small = decode_rgba(include_bytes!("../Assets/icon_16.png"), 16);
+    let medium = decode_rgba(include_bytes!("../Assets/icon_32.png"), 32);
+    let big = decode_rgba(include_bytes!("../Assets/icon_64.png"), 64);
+
+    miniquad::conf::Icon {
+        small: small.try_into().expect("16x16 RGBA = 1024 bytes"),
+        medium: medium.try_into().expect("32x32 RGBA = 4096 bytes"),
+        big: big.try_into().expect("64x64 RGBA = 16384 bytes"),
+    }
 }
