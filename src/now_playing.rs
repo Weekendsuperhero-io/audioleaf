@@ -8,6 +8,7 @@
 //! Linux: Uses `playerctl` subprocess.
 
 /// Debug-only logging (stripped from release builds).
+#[allow(unused_macros)]
 macro_rules! debug_log {
     ($($arg:tt)*) => {
         #[cfg(debug_assertions)]
