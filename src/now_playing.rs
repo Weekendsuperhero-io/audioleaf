@@ -145,8 +145,7 @@ mod macos {
             if count == 0 {
                 return None;
             }
-            let artwork: Option<Retained<AnyObject>> =
-                msg_send![&*artworks, objectAtIndex: 0usize];
+            let artwork: Option<Retained<AnyObject>> = msg_send![&*artworks, objectAtIndex: 0usize];
             let artwork = artwork?;
             let raw: Option<Retained<AnyObject>> = msg_send![&*artwork, rawData];
             let raw = raw?;
@@ -265,8 +264,7 @@ mod macos {
 
         let img = image::load_from_memory(image_bytes).ok()?;
         let rgba = img.to_rgba8();
-        let image_data =
-            ImageData::new(rgba.width(), rgba.height(), rgba.as_raw()).ok()?;
+        let image_data = ImageData::new(rgba.width(), rgba.height(), rgba.as_raw()).ok()?;
         let palette: Palette<f64> = Palette::extract(&image_data).ok()?;
         // Sort by population (most prevalent colors first) and take the
         // top 4 that aren't near-black — these are the actual dominant
@@ -282,7 +280,11 @@ mod macos {
                 [rgb.r, rgb.g, rgb.b]
             })
             .collect();
-        if colors.is_empty() { None } else { Some(colors) }
+        if colors.is_empty() {
+            None
+        } else {
+            Some(colors)
+        }
     }
 }
 
@@ -327,8 +329,7 @@ mod linux {
 
         let img = image::load_from_memory(&bytes).ok()?;
         let rgba = img.to_rgba8();
-        let image_data =
-            ImageData::new(rgba.width(), rgba.height(), rgba.as_raw()).ok()?;
+        let image_data = ImageData::new(rgba.width(), rgba.height(), rgba.as_raw()).ok()?;
         let palette: Palette<f64> = Palette::extract(&image_data).ok()?;
         let mut swatches = palette.swatches().to_vec();
         swatches.sort_by(|a, b| b.population().cmp(&a.population()));
@@ -341,6 +342,10 @@ mod linux {
                 [rgb.r, rgb.g, rgb.b]
             })
             .collect();
-        if colors.is_empty() { None } else { Some(colors) }
+        if colors.is_empty() {
+            None
+        } else {
+            Some(colors)
+        }
     }
 }

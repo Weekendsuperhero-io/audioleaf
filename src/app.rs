@@ -744,8 +744,7 @@ impl App {
                     } else if self.visualizer.current_palette_index
                         < self.visualizer.palette_names.len()
                     {
-                        self.visualizer.palette_names[self.visualizer.current_palette_index]
-                            .clone()
+                        self.visualizer.palette_names[self.visualizer.current_palette_index].clone()
                     } else {
                         "Unknown".to_string()
                     };
