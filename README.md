@@ -1,22 +1,43 @@
 # Audioleaf
 
-A TUI for managing and visualizing music on your Nanoleaf devices (Canvas, Shapes, Elements, and Light Panels)
+A real-time music visualizer for Nanoleaf devices (Shapes, Canvas, Elements, and Light Panels). Audioleaf listens to your system audio, analyzes it, and drives your Nanoleaf panels with reactive color animations — all rendered in a graphical window that mirrors your physical panel layout.
 
-![audioleaf tui view](https://github.com/alfazet/audioleaf/blob/main/images/tui.png)
+![Audioleaf GUI](Assets/gui.png)
 
-> **Note:** This is a fork with macOS compatibility fixes and support for all Nanoleaf device types. See [CHANGELOG.md](CHANGELOG.md) for details.
+![Audioleaf Demo](Assets/demo.gif)
+
+> **Note:** This is a fork with macOS compatibility fixes, a graphical UI, album art integration, and support for all Nanoleaf device types. See [CHANGELOG.md](CHANGELOG.md) for details.
+
+## Features
+
+- **Real-time audio visualization** — Three effects (Spectrum, Energy Wave, Pulse) that react to your music
+- **Graphical panel preview** — See your exact Nanoleaf layout rendered on screen with live color preview
+- **Album art integration** — Automatically extract color palettes from the currently playing track's album artwork (Spotify & Apple Music)
+- **11 built-in color palettes** — From ocean-nightclub to neon-rainbow, plus custom RGB palettes
+- **Panel sorting controls** — Adjust how colors map to your physical layout
+- **Cross-platform** — macOS and Linux
 
 ## Installation
 
-Install from cargo with `cargo install audioleaf`. Make sure that the directory with cargo binaries (by default `$HOME/.cargo/bin`) is added to your `$PATH`.
+Install from cargo:
 
-For users of Arch-based distros, audioleaf is also available as a [package in the AUR](https://aur.archlinux.org/packages/audioleaf). You can install it with your AUR helper of choice, for example with yay: `yay -S audioleaf`.
+```bash
+cargo install audioleaf
+```
+
+Make sure `$HOME/.cargo/bin` is in your `$PATH`.
+
+For Arch-based distros, audioleaf is also available in the [AUR](https://aur.archlinux.org/packages/audioleaf):
+
+```bash
+yay -S audioleaf
+```
 
 ## Usage
 
 ### First-Time Setup
 
-At first launch, `audioleaf` will automatically discover Nanoleaf devices on your local network and prompt you to choose one:
+At first launch, audioleaf discovers Nanoleaf devices on your local network:
 
 ```bash
 audioleaf -n
@@ -24,20 +45,20 @@ audioleaf -n
 
 This will:
 
-1. Scan your network for Nanoleaf devices (Canvas, Shapes, Elements, Light Panels)
-2. Display a list of discovered devices
-3. Prompt you to put your chosen device in pairing mode (hold power button until LEDs flash)
+1. Scan your network for Nanoleaf devices
+2. Display discovered devices
+3. Prompt you to put your device in pairing mode (hold power button until LEDs flash)
 4. Save the device configuration
 
 **Device data location:**
 
 - **macOS**: `~/Library/Application Support/audioleaf/nl_devices.toml`
 - **Linux**: `~/.config/audioleaf/nl_devices.toml`
-- **Custom**: Use `--devices /path/to/devices.toml` to specify a custom location
+- **Custom**: Use `--devices /path/to/devices.toml`
 
-### Running Audioleaf
+### Running
 
-After initial setup, simply run:
+After setup, simply run:
 
 ```bash
 audioleaf
@@ -49,363 +70,146 @@ To connect to a specific device:
 audioleaf -d "Shapes AC01"
 ```
 
-### TUI Controls
+### Controls
 
-Lost in the TUI? Press <kbd>?</kbd> to see the list of keybinds.
+Press <kbd>?</kbd> in the app to see all keybinds.
 
-**Main shortcuts:**
+| Key | Action |
+| --- | --- |
+| <kbd>Esc</kbd> / <kbd>Q</kbd> | Quit |
+| <kbd>?</kbd> | Toggle help overlay |
+| <kbd>Space</kbd> | Toggle live panel color preview |
+| <kbd>-</kbd> / <kbd>+</kbd> | Decrease / increase gain (visual sensitivity) |
+| <kbd>1</kbd>-<kbd>9</kbd>, <kbd>0</kbd> | Switch color palette |
+| <kbd>E</kbd> | Cycle effect: Spectrum / Energy Wave / Pulse |
+| <kbd>A</kbd> | Toggle primary sort axis (X / Y) |
+| <kbd>P</kbd> | Toggle primary sort (Asc / Desc) |
+| <kbd>S</kbd> | Toggle secondary sort (Asc / Desc) |
+| <kbd>N</kbd> | Use album art colors from current track |
+| <kbd>R</kbd> | Reset all panels to black |
 
-- <kbd>Enter</kbd> - Play selected effect
-- <kbd>V</kbd> - Toggle visualizer mode
-- <kbd>j/k</kbd> or <kbd>↓/↑</kbd> - Navigate effect list
-- <kbd>+/-</kbd> - Increase/decrease visualizer gain (sensitivity)
-- <kbd>Q</kbd> or <kbd>Esc</kbd> - Quit
-- <kbd>?</kbd> - Show help
+### Effects
+
+- **Spectrum** — Each panel tracks a frequency band. Bass on one end, treble on the other.
+- **Energy Wave** — Audio energy cascades across panels as a traveling ripple.
+- **Pulse** — All panels pulse together, driven by audio transients. Snaps to the beat.
 
 ## Configuration
 
-All configuration is done through the `config.toml` file. The location depends on your operating system:
+Configuration lives in `config.toml`:
 
 - **macOS**: `~/Library/Application Support/audioleaf/config.toml`
 - **Linux**: `~/.config/audioleaf/config.toml`
-- **Custom**: Use `--config /path/to/config.toml` to override
+- **Custom**: Use `--config /path/to/config.toml`
 
-At first launch, a default config file will be automatically generated after connecting to your Nanoleaf device.
+A default config file is generated on first launch.
 
-### Complete Configuration Reference
+### Example Configuration
 
 ```toml
-# Specify which Nanoleaf device to use by default
 default_nl_device_name = "Shapes AC01"
 
-[tui_config]
-# Display effect names in colors matching their palettes
-colorful_effect_names = true
-
 [visualizer_config]
-# Audio input device name (see Audio Setup section below)
+# Audio input device (see Audio Setup below)
 audio_backend = "BlackHole 2ch"
 
-# Frequency range to visualize (Hz) - [min, max]
-# Lower range = bass-focused, higher range = treble-focused
+# Frequency range to visualize [min_hz, max_hz]
 freq_range = [20, 4500]
 
-# Color palette - use a named palette OR custom hue array
-# Named palette (easiest - see Color Palettes section for all options):
-hues = "ocean-nightclub"
-# OR custom hue array (0-360 on HSB color wheel, 360 = white):
-# hues = [195, 210, 240, 270, 285, 300, 180]
-# hues = [0, 120, 360]  # Red, Green, White
+# Color palette — named palette or custom RGB array
+# Named: "ocean-nightclub", "sunset", "fire", "forest", "neon-rainbow", etc.
+colors = "ocean-nightclub"
+# Or custom RGB: colors = [[255, 0, 128], [0, 128, 255], [128, 255, 0]]
 
-# Audio sensitivity multiplier (default: 1.0)
-# BlackHole 2ch directly: 1 (recommended)
-# VB Cable or other virtual devices: may need 200-500
-# Physical microphones: typically 1-10
-default_gain = 1
+# Audio sensitivity (doesn't affect playback volume)
+default_gain = 1.0
 
-# Panel transition speed in 100ms units (1 = 100ms, 10 = 1s)
+# Panel transition speed in 100ms units (2 = 200ms)
 transition_time = 2
 
 # Audio sampling window in seconds
-# Smaller = more responsive, larger = smoother but laggy
 time_window = 0.1875
 
-# Panel layout sorting (affects visualization direction)
-primary_axis = "Y"        # "X" (left→right) or "Y" (bottom→top)
+# Panel sorting
+primary_axis = "Y"        # "X" or "Y"
 sort_primary = "Asc"      # "Asc" or "Desc"
 sort_secondary = "Asc"    # "Asc" or "Desc"
+
+# Visualization effect
+effect = "Spectrum"        # "Spectrum", "EnergyWave", or "Pulse"
 ```
 
-### Configuration Options Explained
+### Available Palettes
 
-#### TUI Configuration
+| Palette | Description |
+| --- | --- |
+| `ocean-nightclub` | Deep blues, purples, teals |
+| `sunset` | Warm oranges, reds, pinks |
+| `house-music-party` | Energetic magentas, purples, cyans |
+| `tropical-beach` | Turquoise, aqua, lime |
+| `fire` | Reds, oranges, yellows |
+| `forest` | Deep greens, yellow-green |
+| `neon-rainbow` | Full spectrum |
+| `pink-dreams` | Soft pinks through magentas |
+| `cool-blues` | Ice blues to navy |
+| `tmnt` | Turtle green + bandana colors |
+| `christmas` | Red, green, white |
 
-| Option                  | Type    | Default | Description                                              |
-| ----------------------- | ------- | ------- | -------------------------------------------------------- |
-| `colorful_effect_names` | boolean | `true`  | Display effect names with colors matching their palettes |
+## Audio Setup
 
-#### Visualizer Configuration
-
-| Option            | Type                 | Default         | Description                                                                         |
-| ----------------- | -------------------- | --------------- | ----------------------------------------------------------------------------------- |
-| `audio_backend`   | string               | (auto-detected) | Name of audio input device to visualize                                             |
-| `freq_range`      | [int, int]           | `[20, 4500]`    | Min and max frequencies (Hz) to include in visualization                            |
-| `hues`            | string or [int, ...] | varies          | Named palette (e.g., `"sunset"`) OR custom HSB hue array (0-360, use 360 for white) |
-| `default_gain`    | int/float            | `1.0`           | Audio amplification multiplier (doesn't affect playback volume)                     |
-| `transition_time` | int                  | `2`             | Panel color transition time in 100ms units                                          |
-| `time_window`     | float                | `0.1875`        | Audio sampling window length in seconds                                             |
-| `primary_axis`    | string               | `"Y"`           | Primary sort direction: `"X"` or `"Y"`                                              |
-| `sort_primary`    | string               | `"Asc"`         | Primary sort order: `"Asc"` or `"Desc"`                                             |
-| `sort_secondary`  | string               | `"Asc"`         | Secondary sort order: `"Asc"` or `"Desc"`                                           |
-
-### Color Palettes
-
-Colors are specified using **HSB (Hue, Saturation, Brightness)** hue values ranging from **0-360**. You can use either:
-
-1. **Named palettes** (easiest): `hues = "palette-name"`
-2. **Custom hue arrays**: `hues = [0, 60, 120, 180, 240, 300]`
-   - Use values 0-359 for colors on the HSB color wheel
-   - Use **360** for white/near-white colors
-
-#### Using Named Palettes
-
-Simply set `hues` to one of the palette names below:
-
-```toml
-[visualizer_config]
-hues = "sunset"
-```
-
-#### Available Named Palettes
-
-**ocean-nightclub** - Deep blues, purples, and teals
-
-```toml
-hues = "ocean-nightclub"
-# Equivalent to: hues = [195, 210, 240, 270, 285, 300, 180]
-```
-
-**sunset** - Warm oranges, reds, pinks, and purples
-
-```toml
-hues = "sunset"
-# Equivalent to: hues = [15, 25, 340, 350, 0, 10, 310, 280]
-```
-
-**house-music-party** - Energetic magentas, purples, blues, and cyans
-
-```toml
-hues = "house-music-party"
-# Equivalent to: hues = [300, 285, 270, 255, 240, 195, 180]
-```
-
-**tropical-beach** - Turquoise, aqua, lime, and sunny yellows
-
-```toml
-hues = "tropical-beach"
-# Equivalent to: hues = [180, 175, 170, 160, 90, 75, 60]
-```
-
-**fire** - Intense reds, oranges, and yellows
-
-```toml
-hues = "fire"
-# Equivalent to: hues = [0, 10, 20, 30, 40, 50, 60]
-```
-
-**forest** - Deep greens with yellow-green highlights
-
-```toml
-hues = "forest"
-# Equivalent to: hues = [90, 100, 110, 120, 130, 140, 150]
-```
-
-**neon-rainbow** - Full spectrum bright colors
-
-```toml
-hues = "neon-rainbow"
-# Equivalent to: hues = [0, 60, 120, 180, 240, 300]
-```
-
-**pink-dreams** - Soft pinks through magentas
-
-```toml
-hues = "pink-dreams"
-# Equivalent to: hues = [320, 325, 330, 335, 340, 345, 350]
-```
-
-**cool-blues** - Ice blues to deep navy
-
-```toml
-hues = "cool-blues"
-# Equivalent to: hues = [190, 200, 210, 220, 230, 240, 250]
-```
-
-**tmnt** - Turtle green with Leonardo, Michelangelo, Raphael, and Donatello bandana colors
-
-```toml
-hues = "tmnt"
-# Equivalent to: hues = [125, 130, 240, 245, 25, 30, 0, 5, 280, 285]
-```
-
-**christmas** - Festive red, green, and white
-
-```toml
-hues = "christmas"
-# Equivalent to: hues = [0, 5, 120, 125, 360, 360]
-# Red (0, 5), Green (120, 125), White (360, 360)
-```
-
-### HSB Color Wheel Reference
-
-Hue values map to colors on the standard HSB color wheel (0-359 degrees):
-
-- **0° - Red**
-- 15° - Red-Orange
-- **30° - Orange**
-- 45° - Yellow-Orange
-- **60° - Yellow**
-- 90° - Yellow-Green
-- **120° - Green**
-- 150° - Blue-Green
-- **180° - Cyan**
-- 210° - Sky Blue
-- **240° - Blue**
-- 270° - Blue-Purple
-- **300° - Magenta**
-- 330° - Pink-Red
-- **359° - Back to Red**
-
-The Nanoleaf API uses **HSB (Hue, Saturation, Brightness)** color space where:
-
-- **Hue**: 0-359 (color position on the wheel)
-- **Saturation**: 0-100 (color intensity, controlled by device)
-- **Brightness**: 0-100 (lightness, controlled by device settings)
-
-In audioleaf configuration, you specify hue values (0-359). The visualizer dynamically adjusts brightness based on audio input.
-
-**Special white value**: Use **360** to create white/near-white colors. This adds high whiteness to the color, making it appear white or silvery when bright.
-
-Example with white:
-
-```toml
-hues = [0, 120, 360]  # Red, Green, White
-```
-
-For more details, see the [HSB Color System guide](https://www.learnui.design/blog/the-hsb-color-system-practicioners-primer.html) or the [Nanoleaf API documentation](https://forum.nanoleaf.me/docs).
-
-### Audio Setup
-
-#### macOS
+### macOS
 
 1. Install [BlackHole](https://existential.audio/blackhole/) (free virtual audio device)
-2. Open **Audio MIDI Setup** (Applications → Utilities)
-3. Create a **Multi-Output Device**:
-   - Include your speakers/headphones
-   - Include BlackHole 2ch
+2. Open **Audio MIDI Setup** (Applications > Utilities)
+3. Create a **Multi-Output Device** including your speakers + BlackHole 2ch
 4. Set the Multi-Output Device as your system output
 5. Set `audio_backend = "BlackHole 2ch"` in config.toml
-6. Set `default_gain = 1` (normal gain when targeting BlackHole directly)
 
-**Important**: Target `"BlackHole 2ch"` directly, not the Multi-Output Device aggregate. This provides proper audio levels without requiring extreme gain values.
+**Tip**: Target `"BlackHole 2ch"` directly, not the Multi-Output Device aggregate. This provides proper audio levels with `default_gain = 1`.
 
-#### Linux (PulseAudio/PipeWire)
+### Linux (PulseAudio/PipeWire)
 
-1. Run audioleaf once to see available devices
-2. Use `pavucontrol` (PulseAudio Volume Control)
-3. Go to **Recording** tab while audioleaf is running
-4. Set audioleaf's input to your media player's monitor
-5. Set `audio_backend` to match the device name
-6. Adjust `default_gain` as needed (typically 1-10)
+1. Run audioleaf
+2. Open `pavucontrol` (PulseAudio Volume Control)
+3. In the **Recording** tab, set audioleaf's input to your media player's monitor
+4. Set `audio_backend` in config.toml to match
 
-#### Windows
+## Dump Commands
 
-1. Install [VB Cable](https://vb-audio.com/Cable) (free virtual audio cable)
-2. Set VB Cable as your default playback device
-3. Route VB Cable output to your speakers using audio software
-4. Set `audio_backend = "VB Cable"` in config.toml
-5. Set `default_gain = 200` or higher
+Inspect your device without launching the full app:
 
-### Brightness Adjustment
+```bash
+# Show panel layout info
+audioleaf dump layout
 
-Brightness is controlled by your Nanoleaf device settings, not by audioleaf:
+# Interactive graphical layout view (click panels to flash them)
+audioleaf dump layout-graphical
 
-1. Open the Nanoleaf mobile app
-2. Select your device
-3. Adjust the brightness slider
-4. The visualizer will maintain this brightness level
+# List available color palettes
+audioleaf dump palettes
 
-Alternatively, you can adjust brightness directly on the Nanoleaf controller using the physical buttons.
+# Show raw device info
+audioleaf dump info
+```
 
 ## Troubleshooting
 
-### Visualizer Not Responding to Music
+### Visualizer Not Responding
 
-**Symptom**: Panels don't react to audio, or react very weakly.
-
-**Solutions**:
-
-1. **Check audio routing**: Ensure audioleaf is receiving audio input
-   - On Linux: Use `pavucontrol` → Recording tab to verify audio source
-   - On macOS: Verify Multi-Output Device is selected in System Settings
-   - On Windows: Confirm VB Cable routing is correct
-
-2. **Adjust gain**: Different audio sources need different gain levels
-   - Press <kbd>+</kbd>/<kbd>-</kbd> in audioleaf to adjust gain in real-time
-   - BlackHole 2ch (macOS): `default_gain = 1` when targeted directly
-   - VB Cable (Windows): may need `default_gain = 200-500`
-   - Physical microphones: typically `default_gain = 1-10`
-
-3. **Adjust frequency range**: Try different frequency ranges
-   - Bass-heavy: `freq_range = [20, 500]`
-   - Full range: `freq_range = [20, 4500]`
-   - Treble-focused: `freq_range = [1000, 8000]`
-
-### Only One Panel Lights Up
-
-**Symptom**: Only a single panel shows colors during visualization.
-
-**Solution**: This is fixed in this fork. The original version included the controller unit in the panel list. If you're still seeing this:
-
-- Update to the latest version of this fork
-- Run `audioleaf -n` to re-discover your device
-- Delete the devices file and reconnect
+1. **Check audio routing** — Verify audioleaf receives audio input (use `pavucontrol` on Linux, check Multi-Output Device on macOS)
+2. **Adjust gain** — Press <kbd>+</kbd>/<kbd>-</kbd> in the app, or set `default_gain` in config
+3. **Adjust frequency range** — Try `freq_range = [20, 500]` for bass-heavy, `[20, 4500]` for full range
 
 ### Device Not Discovered
 
-**Symptom**: "No Nanoleaf devices found on the local network"
+1. Ensure device is powered on and on the same network
+2. Check firewall isn't blocking SSDP/UDP multicast
+3. Try `audioleaf -n` to re-discover
 
-**Solutions**:
+### Brightness
 
-1. Ensure your device is powered on and connected to the same network
-2. This fork supports all device types: Canvas (nl29), Shapes (nl42), Elements (nl52), and Light Panels (aurora)
-3. Check your firewall isn't blocking SSDP/UDP multicast
-4. Try running with `sudo` on Linux if permission issues exist
-5. Manually specify device in config: `default_nl_device_name = "Your Device Name"`
-
-### Enter Key Not Working in TUI
-
-**Symptom**: Pressing Enter doesn't select effects.
-
-**Solution**: This is fixed in this fork. If still experiencing issues:
-
-- Ensure you're running the latest version
-- Try different terminal emulators (tested with Ghostty, iTerm2, Alacritty)
-- Check terminal supports standard key event handling
-
-### Config Changes Not Taking Effect
-
-**Symptom**: Changing config.toml has no effect.
-
-**Solutions**:
-
-1. **Verify correct config location**:
-   - macOS: `~/Library/Application Support/audioleaf/config.toml`
-   - Linux: `~/.config/audioleaf/config.toml`
-   - Not in `~/.config/` on macOS!
-
-2. **Check TOML syntax**: Ensure proper formatting
-   - Use integers OR floats for `default_gain` (both work)
-   - Arrays use square brackets: `hues = [0, 60, 120]`
-   - Strings use quotes: `audio_backend = "BlackHole 2ch"`
-
-3. **Restart audioleaf**: Changes only apply on launch
-
-### Audio Routing (Linux)
-
-Make sure that audioleaf's audio input is set to be your media player's output. Use any audio mixer software, for example [pavucontrol](https://freedesktop.org/software/pulseaudio/pavucontrol) (for PulseAudio or PipeWire):
-
-1. Go to the **Recording** tab while audioleaf is running
-2. Set the device in the dropdown menu to your media player's monitor
-
-![pavucontrol](https://github.com/alfazet/audioleaf/blob/main/images/pavucontrol.png)
-
-### Audio Routing (Windows)
-
-Windows doesn't have a built-in way to route one program's audio output to another's input. Use third-party software such as [VB Cable](https://vb-audio.com/Cable).
+Brightness is controlled by your Nanoleaf device settings (mobile app or physical buttons), not by audioleaf. The visualizer dynamically adjusts color intensity based on audio.
 
 ## Contributing
 
-Audioleaf is a project made mainly in my spare time as a way to become familiar with Rust, making TUIs, and some basics of audio processing.
-
-Therefore, there are surely many ways to make it more robust, performant and nicer to use - feel free to open a pull request or start a Github issue if you see any potential for audioleaf's improvement. Thank you!
+Feel free to open a pull request or start a GitHub issue. Contributions welcome!

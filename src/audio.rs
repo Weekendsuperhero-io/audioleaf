@@ -55,6 +55,7 @@ impl AudioStream {
                         if let Ok(name) = device.description().map(|d| d.name().to_string())
                             && loopback_names.iter().any(|lb| name.contains(lb))
                         {
+                            #[cfg(debug_assertions)]
                             eprintln!("INFO: Found loopback device: {}", name);
                             loopback_device = Some(device);
                             break;

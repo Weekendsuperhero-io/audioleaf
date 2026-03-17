@@ -1,26 +1,15 @@
 use crate::audio;
 use crate::constants;
-use crate::event_handler::{self, Event};
-use crate::utils;
-use crate::visualizer::VisualizerMsg;
+use crate::layout_visualizer::PanelInfo;
+use crate::visualizer::{self, VisualizerMsg};
 use crate::{
-    config::{Axis, Effect, Sort, TuiConfig, VisualizerConfig},
-    nanoleaf::{NlDevice, NlEffect},
-    visualizer,
+    config::{Axis, Effect, Sort, VisualizerConfig},
+    nanoleaf::NlDevice,
 };
 use anyhow::Result;
-use ratatui::{
-    Frame, Terminal,
-    crossterm::event::KeyCode,
-    layout::Margin,
-    prelude::Backend,
-    style::{Color, Style, Stylize},
-    text::{Line, Span},
-    widgets::{
-        Block, Borders, HighlightSpacing, List, ListDirection, ListItem, ListState, Paragraph,
-        Scrollbar, ScrollbarOrientation, ScrollbarState,
-    },
-};
+use macroquad::prelude::*;
+use std::collections::HashMap;
+use std::f32::consts::PI;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering},
@@ -28,142 +17,57 @@ use std::sync::{
 };
 use std::time::Duration;
 
-#[derive(Debug, Default)]
-enum AppState {
-    #[default]
-    RunningEffectList,
-    RunningVisualizer,
-    Done,
-}
-
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum AppView {
-    #[default]
-    EffectList,
-    Visualizer,
-    HelpScreen,
-}
-
-#[derive(Debug)]
-enum AppMsg {
-    NoOp,
-    Quit,
-    ChangeView(AppView),
-    PlayEffect(usize),
-    ScrollDown(u16),
-    ScrollUp(u16),
-    ScrollToBottom,
-    ScrollToTop,
-    ChangeGain(f32),
-    ChangePalette(usize),
-    CycleEffect,
-    ResetPanels,
-    UseAlbumArtPalette,
-    ToggleAxis,
-    TogglePrimarySort,
-    ToggleSecondarySort,
-}
-
 /// Display state shared between the main thread and the album art watcher thread.
-#[derive(Debug)]
 struct VizState {
-    /// The RGB colors currently driving the visualizer palette.
     colors: Vec<[u8; 3]>,
-    /// Set when album art mode is active; cleared when switching to a named palette.
     track_title: Option<String>,
+    artwork_bytes: Option<Vec<u8>>,
 }
 
-#[derive(Debug)]
-struct Scroll {
-    pos: u16,
-    state: ScrollbarState,
-}
+pub struct App {
+    // Device
+    nl_device: NlDevice,
+    panels: Vec<PanelInfo>,
+    global_orientation: u16,
 
-#[derive(Debug)]
-struct EffectList {
-    list: Vec<NlEffect>,
-    state: ListState,
-    scroll: Scroll,
-}
+    // Visualizer
+    visualizer_tx: mpsc::Sender<VisualizerMsg>,
+    shared_colors: Arc<Mutex<HashMap<u16, [u8; 3]>>>,
 
-#[derive(Debug)]
-struct Visualizer {
-    tx: mpsc::Sender<VisualizerMsg>,
+    // Settings
     gain: f32,
     current_palette_index: usize,
     palette_names: Vec<String>,
-    viz_state: Arc<Mutex<VizState>>,
-    album_art_stop: Option<Arc<AtomicBool>>,
     effect: Effect,
     primary_axis: Axis,
     sort_primary: Sort,
     sort_secondary: Sort,
-    global_orientation: u16,
-}
 
-#[derive(Debug)]
-pub struct App {
-    state: AppState,
-    prev_view: AppView,
-    view: AppView,
-    nl_device: NlDevice,
-    effect_list: EffectList,
-    visualizer: Visualizer,
-    display_colors: bool,
+    // UI state
+    show_visualization: bool,
+    show_help: bool,
+
+    // Album art
+    viz_state: Arc<Mutex<VizState>>,
+    album_art_stop: Option<Arc<AtomicBool>>,
+    album_art_texture: Option<Texture2D>,
+    /// Tracks which artwork bytes we've already loaded into the texture
+    loaded_artwork_len: usize,
 }
 
 impl App {
-    /// Constructs a new `App` for TUI-based Nanoleaf effect selection and audio visualizer.
+    /// Constructs a new `App` with macroquad-based graphical UI.
     ///
-    /// Initializes:
-    /// - Effect list from device API, selects current effect if running.
-    /// - Visualizer with audio stream, UDP, config params, starts processing thread via `init()`.
-    /// - State to EffectList view, running effects mode.
-    /// - Palette names from predefined for switching.
-    /// - Colorful names from TUI config.
-    /// - Fetches device global orientation for panel sorting.
-    ///
-    /// # Arguments
-    ///
-    /// * `nl_device` - Connected Nanoleaf device.
-    /// * `tui_config` - UI settings like colorful effect names.
-    /// * `visualizer_config` - Audio/viz params like gain, hues, sorting.
-    ///
-    /// # Errors
-    ///
-    /// From device API, visualizer new/init, or effect list fetch.
-    pub fn new(
-        nl_device: NlDevice,
-        tui_config: TuiConfig,
-        visualizer_config: VisualizerConfig,
-    ) -> Result<Self> {
-        let state = AppState::default();
-        let prev_view = AppView::default();
-        let view = AppView::default();
-        let list = nl_device.get_effect_list()?;
-        let list_pos = if let Some(cur_effect_name) = nl_device.cur_effect_name.as_deref() {
-            list.iter()
-                .position(|effect| effect.name == cur_effect_name)
-                .unwrap_or(0)
-        } else {
-            0
-        };
-        let scroll = Scroll {
-            pos: 0,
-            state: ScrollbarState::default(),
-        };
-        let effect_list = EffectList {
-            list,
-            state: ListState::default().with_selected(Some(list_pos)),
-            scroll,
-        };
+    /// Initializes the audio visualizer thread, fetches panel layout from the device,
+    /// and prepares all settings state. Requests UDP control immediately.
+    pub fn new(nl_device: NlDevice, visualizer_config: VisualizerConfig) -> Result<Self> {
         let audio_stream = audio::AudioStream::new(visualizer_config.audio_backend.as_deref())?;
         let gain = visualizer_config
             .default_gain
             .unwrap_or(constants::DEFAULT_GAIN);
+        #[cfg(debug_assertions)]
         eprintln!("INFO: Starting with gain: {}", gain);
 
-        // Get global orientation
         let global_orientation = nl_device
             .get_global_orientation()
             .ok()
@@ -180,299 +84,619 @@ impl App {
             .clone()
             .unwrap_or_else(|| Vec::from(constants::DEFAULT_COLORS));
 
-        let tx = visualizer::Visualizer::new(visualizer_config, audio_stream, &nl_device)?.init();
+        // Fetch panel layout for graphical rendering
+        let layout = nl_device.get_panel_layout()?;
+        let panels = crate::layout_visualizer::parse_layout(&layout)?;
 
-        // Initialize palette list
+        // Shared color state: visualizer thread writes panel colors, UI reads them
+        let shared_colors: Arc<Mutex<HashMap<u16, [u8; 3]>>> = Arc::new(Mutex::new(HashMap::new()));
+
+        let tx = visualizer::Visualizer::new(
+            visualizer_config,
+            audio_stream,
+            &nl_device,
+            Arc::clone(&shared_colors),
+        )?
+        .init();
+
         let mut palette_names = crate::palettes::get_palette_names();
         palette_names.sort();
+
         let viz_state = Arc::new(Mutex::new(VizState {
             colors: initial_colors,
             track_title: None,
+            artwork_bytes: None,
         }));
 
-        let visualizer = Visualizer {
-            tx,
+        nl_device.request_udp_control()?;
+
+        Ok(App {
+            nl_device,
+            panels,
+            global_orientation,
+            visualizer_tx: tx,
+            shared_colors,
             gain,
             current_palette_index: 0,
             palette_names,
-            viz_state,
-            album_art_stop: None,
             effect,
             primary_axis,
             sort_primary,
             sort_secondary,
-            global_orientation,
-        };
-        let display_colors = tui_config
-            .colorful_effect_names
-            .unwrap_or(constants::DEFAULT_COLORFUL_EFFECT_NAMES);
-
-        Ok(App {
-            state,
-            prev_view,
-            view,
-            nl_device,
-            effect_list,
-            visualizer,
-            display_colors,
+            show_visualization: false,
+            show_help: false,
+            viz_state,
+            album_art_stop: None,
+            album_art_texture: None,
+            loaded_artwork_len: 0,
         })
     }
 
-    /// Executes the main TUI application loop.
-    ///
-    /// Creates event handler for key/tick events.
-    /// Loop: draw current view, receive event, map to AppMsg, update app state.
-    /// Breaks when state=Done (quit).
-    /// On exit, sends End msg to visualizer to stop audio/UDP thread.
-    ///
-    /// # Arguments
-    ///
-    /// * `self` - Mutable app state.
-    /// * `terminal` - Ratatui terminal for rendering frames.
-    ///
-    /// # Errors
-    ///
-    /// From event recv, update logic, or draw.
-    pub fn run<B: Backend>(&mut self, terminal: &mut Terminal<B>) -> Result<()>
-    where
-        B::Error: Send + Sync + 'static,
-    {
-        let event_handler = event_handler::EventHandler::new();
+    /// Launches the macroquad window and runs the main graphical event loop.
+    /// Blocks until the window is closed.
+    pub fn run(self) {
+        let title = format!("Audioleaf - {}", self.nl_device.name);
+        macroquad::Window::from_config(
+            Conf {
+                window_title: title,
+                window_width: 1200,
+                window_height: 800,
+                window_resizable: true,
+                icon: Some(load_icon()),
+                ..Default::default()
+            },
+            async move {
+                let mut app = self;
+                app.main_loop().await;
+            },
+        );
+    }
+
+    async fn main_loop(&mut self) {
         loop {
-            terminal.draw(|frame| self.render_view(frame))?;
-            let event = event_handler.next()?;
-            let msg = self.event_to_msg(event);
-            self.update(msg)?;
-            if let AppState::Done = self.state {
+            clear_background(Color::from_rgba(20, 20, 30, 255));
+
+            if self.handle_input() {
                 break;
             }
+
+            // Check if artwork bytes have changed and reload texture
+            self.update_album_art_texture();
+
+            self.draw_panels();
+            self.draw_hud();
+
+            if self.show_help {
+                self.draw_help_overlay();
+            }
+
+            next_frame().await;
         }
-        self.visualizer.tx.send(VisualizerMsg::End)?;
-        self.shutdown()
+
+        // Shutdown
+        let _ = self.visualizer_tx.send(VisualizerMsg::End);
+        self.stop_album_art_watcher();
+        let _ = self.nl_device.set_state(Some(false), Some(0));
     }
 
-    /// Shuts down the device by turning it off and setting brightness to 0.
-    ///
-    /// Called after the main TUI loop exits to restore the device to an off state.
-    pub fn shutdown(&self) -> Result<()> {
-        self.nl_device.set_state(Some(false), Some(0))?;
-        Ok(())
+    /// Process keyboard input. Returns true if quit was requested.
+    fn handle_input(&mut self) -> bool {
+        if is_key_pressed(KeyCode::Escape) {
+            return true;
+        }
+
+        while let Some(ch) = get_char_pressed() {
+            match ch {
+                'Q' => return true,
+                '?' => self.show_help = !self.show_help,
+                _ if self.show_help => {} // Swallow other keys while help is shown
+                '-' | '_' => {
+                    self.gain -= 0.05;
+                    let _ = self.visualizer_tx.send(VisualizerMsg::SetGain(self.gain));
+                }
+                '=' | '+' => {
+                    self.gain += 0.05;
+                    let _ = self.visualizer_tx.send(VisualizerMsg::SetGain(self.gain));
+                }
+                '1'..='9' => {
+                    let index = (ch as usize) - ('1' as usize);
+                    self.change_palette(index);
+                }
+                '0' => self.change_palette(9),
+                'a' | 'A' => self.toggle_axis(),
+                'p' | 'P' => self.toggle_primary_sort(),
+                's' | 'S' => self.toggle_secondary_sort(),
+                'e' | 'E' => self.cycle_effect(),
+                'n' | 'N' => self.use_album_art_palette(),
+                'r' | 'R' => {
+                    let _ = self.visualizer_tx.send(VisualizerMsg::ResetPanels);
+                }
+                ' ' => self.show_visualization = !self.show_visualization,
+                _ => {}
+            }
+        }
+
+        false
     }
 
-    /// Converts raw terminal events to `AppMsg` for state updates.
-    ///
-    /// Ignores ticks (NoOp).
-    /// Maps KeyEvent codes to actions:
-    /// - ESC/Q: Quit
-    /// - Enter: Play selected effect in list view
-    /// - Up/Down/j/k: Scroll list
-    /// - g/G: Scroll top/bottom
-    /// - V: Toggle EffectList <-> Visualizer view
-    /// - ?: Toggle help screen
-    /// - +/-=_ : Adjust visualizer gain by ±0.05
-    /// - 0-9: Switch to numbered palette
-    /// - a/A: Toggle primary axis X/Y
-    /// - p/P: Toggle primary sort Asc/Desc
-    /// - s/S: Toggle secondary sort Asc/Desc
-    /// - e/E: Cycle visual effect (Spectrum / Energy Wave)
-    /// - Defaults to NoOp for unhandled.
-    ///
-    /// View-specific logic, e.g., scroll only in EffectList.
-    fn event_to_msg(&self, event: Event) -> AppMsg {
-        match event {
-            Event::Tick => AppMsg::NoOp,
-            Event::Key(e) => match e.code {
-                KeyCode::Esc | KeyCode::Char('Q') => AppMsg::Quit,
-                KeyCode::Enter => {
-                    if let AppView::EffectList = self.view {
-                        if let Some(selected) = self.effect_list.state.selected() {
-                            AppMsg::PlayEffect(selected)
-                        } else {
-                            AppMsg::NoOp
-                        }
-                    } else {
-                        AppMsg::NoOp
-                    }
+    // ── Panel rendering ──────────────────────────────────────────────────
+
+    fn draw_panels(&self) {
+        let sw = screen_width();
+        let sh = screen_height();
+
+        // Find the largest panel radius (in layout units) so we can include
+        // the full extent of edge panels in the bounding box, not just centers.
+        let max_panel_radius = self
+            .panels
+            .iter()
+            .filter(|p| p.shape_type.side_length >= 1.0)
+            .map(|p| {
+                let s = p.shape_type.side_length;
+                match p.shape_type.num_sides() {
+                    3 => s / f32::sqrt(3.0),
+                    4 => s / f32::sqrt(2.0),
+                    _ => s,
                 }
-                KeyCode::Down | KeyCode::Char('j') => {
-                    if let AppView::EffectList = self.view {
-                        AppMsg::ScrollDown(1)
-                    } else {
-                        AppMsg::NoOp
-                    }
+            })
+            .fold(0.0_f32, f32::max);
+
+        let min_x = self.panels.iter().map(|p| p.x).min().unwrap_or(0) as f32 - max_panel_radius;
+        let max_x = self.panels.iter().map(|p| p.x).max().unwrap_or(0) as f32 + max_panel_radius;
+        let min_y = self.panels.iter().map(|p| p.y).min().unwrap_or(0) as f32 - max_panel_radius;
+        let max_y = self.panels.iter().map(|p| p.y).max().unwrap_or(0) as f32 + max_panel_radius;
+
+        let layout_width = (max_x - min_x).max(1.0);
+        let layout_height = (max_y - min_y).max(1.0);
+
+        let padding_top = 40.0;
+        let padding_bottom = 40.0;
+        let padding_sides = 40.0;
+        let available_width = sw - 2.0 * padding_sides;
+        let available_height = sh - padding_top - padding_bottom;
+
+        let scale = (available_width / layout_width).min(available_height / layout_height);
+
+        let offset_x = (sw - layout_width * scale) / 2.0;
+        let offset_y = padding_top + (available_height - layout_height * scale) / 2.0;
+
+        // Snapshot visualization colors once per frame
+        let vis_colors = if self.show_visualization {
+            self.shared_colors.lock().ok().map(|map| map.clone())
+        } else {
+            None
+        };
+
+        // First pass: compute rotated screen positions
+        let transformed: Vec<(f32, f32)> = self
+            .panels
+            .iter()
+            .map(|panel| {
+                let rel_x = (panel.x as f32 - min_x) - layout_width / 2.0;
+                let rel_y = (panel.y as f32 - min_y) - layout_height / 2.0;
+                let angle = -(self.global_orientation as f32).to_radians();
+                let rotated_x = rel_x * angle.cos() - rel_y * angle.sin();
+                let rotated_y = rel_x * angle.sin() + rel_y * angle.cos();
+                let screen_x = offset_x + (rotated_x + layout_width / 2.0) * scale;
+                let screen_y = offset_y + (layout_height / 2.0 - rotated_y) * scale;
+                (screen_x, screen_y)
+            })
+            .collect();
+
+        // Second pass: draw
+        for (i, panel) in self.panels.iter().enumerate() {
+            let (x, y) = transformed[i];
+            if panel.shape_type.side_length < 1.0 {
+                draw_controller(x, y, panel, scale, &self.panels, &transformed);
+            } else {
+                self.draw_light_panel(x, y, panel, scale, &vis_colors);
+            }
+        }
+    }
+
+    fn draw_light_panel(
+        &self,
+        x: f32,
+        y: f32,
+        panel: &PanelInfo,
+        scale: f32,
+        vis_colors: &Option<HashMap<u16, [u8; 3]>>,
+    ) {
+        let num_sides = panel.shape_type.num_sides();
+        let side_length = panel.shape_type.side_length * scale;
+
+        let radius = match num_sides {
+            3 => side_length / f32::sqrt(3.0),
+            4 => side_length / f32::sqrt(2.0),
+            _ => side_length,
+        };
+
+        let start_angle = (panel.orientation as f32).to_radians();
+        let vertices: Vec<Vec2> = (0..num_sides)
+            .map(|i| {
+                let angle = start_angle + (i as f32 * 2.0 * PI / num_sides as f32);
+                Vec2::new(x + radius * angle.cos(), y + radius * angle.sin())
+            })
+            .collect();
+
+        // Determine fill color: live visualization or static shape-type color
+        let color = if let Some(colors_map) = vis_colors {
+            if let Some(&[r, g, b]) = colors_map.get(&panel.panel_id) {
+                Color::from_rgba(r, g, b, 255)
+            } else {
+                Color::from_rgba(30, 30, 40, 200)
+            }
+        } else {
+            match panel.shape_type.id {
+                0 | 8 | 9 => Color::from_rgba(255, 100, 100, 200),
+                2..=4 => Color::from_rgba(100, 255, 100, 200),
+                7 | 14 | 15 => Color::from_rgba(100, 150, 255, 200),
+                30..=32 => Color::from_rgba(255, 255, 100, 200),
+                _ => Color::from_rgba(150, 150, 150, 200),
+            }
+        };
+
+        // Fill polygon (triangle fan)
+        for i in 1..(num_sides - 1) {
+            draw_triangle(vertices[0], vertices[i], vertices[i + 1], color);
+        }
+
+        // Outline
+        let outline = if vis_colors.is_some() {
+            Color::from_rgba(60, 60, 80, 255)
+        } else {
+            WHITE
+        };
+        for i in 0..num_sides {
+            let next = (i + 1) % num_sides;
+            draw_line(
+                vertices[i].x,
+                vertices[i].y,
+                vertices[next].x,
+                vertices[next].y,
+                2.0,
+                outline,
+            );
+        }
+    }
+
+    // ── Album art texture ─────────────────────────────────────────────────
+
+    fn update_album_art_texture(&mut self) {
+        let bytes_opt = self
+            .viz_state
+            .lock()
+            .ok()
+            .and_then(|s| s.artwork_bytes.clone());
+        if let Some(bytes) = bytes_opt {
+            // Only reload if the bytes actually changed
+            if bytes.len() != self.loaded_artwork_len {
+                if let Ok(img) = image::load_from_memory(&bytes) {
+                    let rgba = img.to_rgba8();
+                    let (w, h) = (rgba.width() as u16, rgba.height() as u16);
+                    let tex = Texture2D::from_rgba8(w, h, rgba.as_raw());
+                    tex.set_filter(FilterMode::Linear);
+                    self.album_art_texture = Some(tex);
                 }
-                KeyCode::Up | KeyCode::Char('k') => {
-                    if let AppView::EffectList = self.view {
-                        AppMsg::ScrollUp(1)
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('g') => AppMsg::ScrollToTop,
-                KeyCode::Char('G') => AppMsg::ScrollToBottom,
-                KeyCode::Char('V') | KeyCode::Char('v') => match self.view {
-                    AppView::HelpScreen => AppMsg::NoOp,
-                    AppView::EffectList => AppMsg::ChangeView(AppView::Visualizer),
-                    AppView::Visualizer => AppMsg::ChangeView(AppView::EffectList),
+                self.loaded_artwork_len = bytes.len();
+            }
+        } else if self.album_art_texture.is_some() {
+            // Artwork cleared (switched to named palette)
+            self.album_art_texture = None;
+            self.loaded_artwork_len = 0;
+        }
+    }
+
+    // ── HUD ──────────────────────────────────────────────────────────────
+
+    fn draw_hud(&self) {
+        let sw = screen_width();
+        let sh = screen_height();
+
+        // ── Top-left: device name ──
+        let name_text = format!("Connected to {}", self.nl_device.name);
+        let name_size = 28.0;
+        let nm = sharp_measure(name_size, &name_text);
+        draw_rectangle(
+            5.0,
+            2.0,
+            nm.width + 14.0,
+            nm.height + 10.0,
+            Color::from_rgba(0, 0, 0, 160),
+        );
+        sharp_text(
+            &name_text,
+            12.0,
+            nm.height + 5.0,
+            name_size,
+            Color::from_rgba(220, 130, 255, 255),
+        );
+
+        // ── Top-right: preview toggle ──
+        let vis_text = if self.show_visualization {
+            "Preview: ON [Space]"
+        } else {
+            "Preview: OFF [Space]"
+        };
+        let vis_color = if self.show_visualization {
+            Color::from_rgba(100, 255, 100, 255)
+        } else {
+            Color::from_rgba(150, 150, 150, 255)
+        };
+        let vm = sharp_measure(22.0, vis_text);
+        draw_rectangle(
+            sw - vm.width - 19.0,
+            2.0,
+            vm.width + 14.0,
+            vm.height + 10.0,
+            Color::from_rgba(0, 0, 0, 160),
+        );
+        sharp_text(
+            vis_text,
+            sw - vm.width - 12.0,
+            vm.height + 5.0,
+            22.0,
+            vis_color,
+        );
+
+        // ── Bottom-left: effect + palette + colors ──
+        let effect_str = match self.effect {
+            Effect::Spectrum => "Spectrum",
+            Effect::EnergyWave => "Energy Wave",
+            Effect::Pulse => "Pulse",
+        };
+        let (palette_name, track_title) = {
+            let state = self.viz_state.lock().unwrap();
+            let name = if state.track_title.is_some() {
+                "album-art".to_string()
+            } else if self.current_palette_index < self.palette_names.len() {
+                self.palette_names[self.current_palette_index].clone()
+            } else {
+                "Unknown".to_string()
+            };
+            (name, state.track_title.clone())
+        };
+
+        let effect_text = format!("Effect: {}  |  Gain: {:.2}", effect_str, self.gain);
+        let mut palette_text = format!("Palette: {}", palette_name);
+        if let Some(title) = &track_title {
+            palette_text.push_str(&format!("  |  Now playing: {}", title));
+        }
+
+        let big = 26.0;
+        let em = sharp_measure(big, &effect_text);
+        let pm = sharp_measure(big, &palette_text);
+        let box_w = em.width.max(pm.width) + 14.0;
+
+        // Color swatches measurement
+        let colors = self.viz_state.lock().unwrap().colors.clone();
+        let swatch_total_w = 22.0 * colors.len() as f32;
+        let box_w = box_w.max(swatch_total_w + 80.0);
+
+        let box_h = big * 2.0 + 30.0 + 18.0; // two text lines + swatch row + padding
+        let box_y = sh - box_h - 5.0;
+
+        draw_rectangle(5.0, box_y, box_w, box_h, Color::from_rgba(0, 0, 0, 160));
+
+        let line1_y = box_y + big + 4.0;
+        sharp_text(&effect_text, 12.0, line1_y, big, WHITE);
+
+        let line2_y = line1_y + big + 4.0;
+        sharp_text(
+            &palette_text,
+            12.0,
+            line2_y,
+            big,
+            Color::from_rgba(100, 255, 100, 255),
+        );
+
+        // Color swatches
+        let swatch_y = line2_y + 8.0;
+        let mut sx = 12.0;
+        for [r, g, b] in &colors {
+            draw_rectangle(sx, swatch_y, 18.0, 14.0, Color::from_rgba(*r, *g, *b, 255));
+            sx += 22.0;
+        }
+
+        // ── Bottom-right: album art + sorting ──
+        let mut art_bottom = 0.0_f32;
+        if let Some(tex) = &self.album_art_texture {
+            let art_size = 140.0;
+            let ax = sw - art_size - 10.0;
+            let ay = sh - art_size - 35.0;
+            // Semi-transparent background behind art
+            draw_rectangle(
+                ax - 4.0,
+                ay - 4.0,
+                art_size + 8.0,
+                art_size + 8.0,
+                Color::from_rgba(0, 0, 0, 160),
+            );
+            draw_texture_ex(
+                tex,
+                ax,
+                ay,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(Vec2::new(art_size, art_size)),
+                    ..Default::default()
                 },
-                KeyCode::Char('?') => {
-                    if let AppView::HelpScreen = self.view {
-                        AppMsg::ChangeView(self.prev_view)
-                    } else {
-                        AppMsg::ChangeView(AppView::HelpScreen)
-                    }
+            );
+            art_bottom = ay + art_size + 4.0;
+        }
+        let axis_str = match self.primary_axis {
+            Axis::X => "X",
+            Axis::Y => "Y",
+        };
+        let pri_str = match self.sort_primary {
+            Sort::Asc => "Asc",
+            Sort::Desc => "Desc",
+        };
+        let sec_str = match self.sort_secondary {
+            Sort::Asc => "Asc",
+            Sort::Desc => "Desc",
+        };
+        let sort_text = format!(
+            "Sort: Axis={} Primary={} Secondary={}",
+            axis_str, pri_str, sec_str
+        );
+        let sm = sharp_measure(18.0, &sort_text);
+        let sort_y = if art_bottom > 0.0 {
+            art_bottom
+        } else {
+            sh - sm.height - 15.0
+        };
+        draw_rectangle(
+            sw - sm.width - 19.0,
+            sort_y,
+            sm.width + 14.0,
+            sm.height + 10.0,
+            Color::from_rgba(0, 0, 0, 160),
+        );
+        sharp_text(
+            &sort_text,
+            sw - sm.width - 12.0,
+            sort_y + sm.height + 3.0,
+            18.0,
+            Color::from_rgba(255, 255, 100, 255),
+        );
+
+        // ── Bottom-center: controls hint ──
+        let hint = "? help | ESC quit | Space preview | -/+ gain | 1-0 palette | E effect | N album art | R reset";
+        let hm = sharp_measure(14.0, hint);
+        let hx = (sw - hm.width) / 2.0;
+        sharp_text(
+            hint,
+            hx,
+            sh - 10.0,
+            14.0,
+            Color::from_rgba(100, 100, 100, 200),
+        );
+    }
+
+    fn draw_help_overlay(&self) {
+        let sw = screen_width();
+        let sh = screen_height();
+
+        draw_rectangle(0.0, 0.0, sw, sh, Color::from_rgba(0, 0, 0, 200));
+
+        let x = sw / 2.0 - 280.0;
+        let mut y = sh / 2.0 - 180.0;
+
+        sharp_text("Keybinds", x, y, 28.0, WHITE);
+        y += 40.0;
+
+        let binds = [
+            ("ESC / Q", "Quit"),
+            ("?", "Toggle this help"),
+            ("Space", "Toggle panel visualization preview"),
+            ("-  /  +", "Decrease / increase gain"),
+            ("1-9, 0", "Switch color palette"),
+            ("E", "Cycle effect: Spectrum / Energy Wave / Pulse"),
+            ("A", "Toggle primary axis (X / Y)"),
+            ("P", "Toggle primary sort (Asc / Desc)"),
+            ("S", "Toggle secondary sort (Asc / Desc)"),
+            ("N", "Use album art colors from current track"),
+            ("R", "Reset all panels to black"),
+        ];
+
+        for (key, desc) in &binds {
+            sharp_text(key, x, y, 20.0, Color::from_rgba(255, 255, 100, 255));
+            sharp_text(desc, x + 120.0, y, 20.0, WHITE);
+            y += 26.0;
+        }
+
+        sharp_text(
+            "(Gain only affects visuals, not your music volume)",
+            x,
+            y + 14.0,
+            16.0,
+            GRAY,
+        );
+    }
+
+    // ── Settings changes ─────────────────────────────────────────────────
+
+    fn change_palette(&mut self, index: usize) {
+        if index < self.palette_names.len() {
+            let palette_name = &self.palette_names[index];
+            if let Some(colors) = crate::palettes::get_palette(palette_name) {
+                self.current_palette_index = index;
+                self.stop_album_art_watcher();
+                if let Ok(mut state) = self.viz_state.lock() {
+                    state.colors = colors.clone();
+                    state.track_title = None;
                 }
-                KeyCode::Char('-') | KeyCode::Char('_') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ChangeGain(-0.05)
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('=') | KeyCode::Char('+') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ChangeGain(0.05)
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('1') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ChangePalette(0)
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('2') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ChangePalette(1)
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('3') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ChangePalette(2)
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('4') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ChangePalette(3)
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('5') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ChangePalette(4)
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('6') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ChangePalette(5)
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('7') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ChangePalette(6)
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('8') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ChangePalette(7)
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('9') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ChangePalette(8)
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('0') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ChangePalette(9)
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('a') | KeyCode::Char('A') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ToggleAxis
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('p') | KeyCode::Char('P') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::TogglePrimarySort
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('s') | KeyCode::Char('S') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ToggleSecondarySort
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('e') | KeyCode::Char('E') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::CycleEffect
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('n') | KeyCode::Char('N') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::UseAlbumArtPalette
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                KeyCode::Char('r') | KeyCode::Char('R') => {
-                    if let AppView::Visualizer = self.view {
-                        AppMsg::ResetPanels
-                    } else {
-                        AppMsg::NoOp
-                    }
-                }
-                _ => AppMsg::NoOp,
-            },
+                let _ = self.visualizer_tx.send(VisualizerMsg::SetPalette(colors));
+            }
         }
     }
 
-    /// Signals the album art watcher thread to stop, if one is running.
-    fn stop_album_art_watcher(&mut self) {
-        if let Some(stop) = self.visualizer.album_art_stop.take() {
-            stop.store(true, Ordering::Relaxed);
-        }
-        if let Ok(mut state) = self.visualizer.viz_state.lock() {
-            state.track_title = None;
-        }
+    fn toggle_axis(&mut self) {
+        self.primary_axis = match self.primary_axis {
+            Axis::X => Axis::Y,
+            Axis::Y => Axis::X,
+        };
+        self.send_sorting();
     }
 
-    /// Spawns a background thread that polls the current track title every 3 seconds.
-    /// When the title changes it fetches the new album art and sends SetPalette directly
-    /// to the visualizer thread. Stopped by setting the AtomicBool stop flag.
-    fn start_album_art_watcher(&mut self) {
+    fn toggle_primary_sort(&mut self) {
+        self.sort_primary = match self.sort_primary {
+            Sort::Asc => Sort::Desc,
+            Sort::Desc => Sort::Asc,
+        };
+        self.send_sorting();
+    }
+
+    fn toggle_secondary_sort(&mut self) {
+        self.sort_secondary = match self.sort_secondary {
+            Sort::Asc => Sort::Desc,
+            Sort::Desc => Sort::Asc,
+        };
+        self.send_sorting();
+    }
+
+    fn send_sorting(&self) {
+        let _ = self.visualizer_tx.send(VisualizerMsg::SetSorting {
+            primary_axis: self.primary_axis,
+            sort_primary: self.sort_primary,
+            sort_secondary: self.sort_secondary,
+            global_orientation: self.global_orientation,
+        });
+    }
+
+    fn cycle_effect(&mut self) {
+        self.effect = match self.effect {
+            Effect::Spectrum => Effect::EnergyWave,
+            Effect::EnergyWave => Effect::Pulse,
+            Effect::Pulse => Effect::Spectrum,
+        };
+        let _ = self
+            .visualizer_tx
+            .send(VisualizerMsg::SetEffect(self.effect));
+    }
+
+    /// Fetches album art + palette on a background thread so the render loop
+    /// never blocks on HTTP downloads or color extraction.
+    fn use_album_art_palette(&mut self) {
         self.stop_album_art_watcher();
         let stop = Arc::new(AtomicBool::new(false));
-        self.visualizer.album_art_stop = Some(Arc::clone(&stop));
-        let tx = self.visualizer.tx.clone();
-        let viz_state = Arc::clone(&self.visualizer.viz_state);
+        self.album_art_stop = Some(Arc::clone(&stop));
+        let tx = self.visualizer_tx.clone();
+        let viz_state = Arc::clone(&self.viz_state);
         std::thread::spawn(move || {
+            // Initial fetch
+            if let Some((artwork, colors)) = crate::now_playing::fetch_artwork_and_palette() {
+                let title = crate::now_playing::get_track_title();
+                if let Ok(mut state) = viz_state.lock() {
+                    state.colors = colors.clone();
+                    state.track_title = title;
+                    state.artwork_bytes = Some(artwork);
+                }
+                let _ = tx.send(VisualizerMsg::SetPalette(colors));
+            }
+
+            // Then poll for track changes
             let mut last_title = crate::now_playing::get_track_title();
             loop {
                 std::thread::sleep(Duration::from_secs(3));
@@ -482,10 +706,12 @@ impl App {
                 let title = crate::now_playing::get_track_title();
                 if title != last_title {
                     last_title = title.clone();
-                    if let Some(colors) = crate::now_playing::fetch_palette() {
+                    if let Some((artwork, colors)) = crate::now_playing::fetch_artwork_and_palette()
+                    {
                         if let Ok(mut state) = viz_state.lock() {
                             state.colors = colors.clone();
                             state.track_title = title;
+                            state.artwork_bytes = Some(artwork);
                         }
                         let _ = tx.send(VisualizerMsg::SetPalette(colors));
                     }
@@ -494,375 +720,165 @@ impl App {
         });
     }
 
-    /// Applies an `AppMsg` to update application state, views, or external components.
-    ///
-    /// Match on msg type:
-    /// - NoOp/Quit: Idle or set Done state.
-    /// - Scroll: Adjust effect list selection and scrollbar position.
-    /// - View change: Switch views, pause/resume visualizer or effects mode, enable UDP if needed.
-    /// - PlayEffect: Calls device.play_effect by selected name.
-    /// - ChangeGain/Palette: Send SetGain/SetPalette to visualizer tx.
-    /// - Toggles (Axis/Sorts): Flip enum, send SetSorting with current params to visualizer.
-    ///
-    /// Syncs list state with scrollbar for rendering.
-    /// Ensures state transitions (e.g., resume viz only if switching to it).
-    ///
-    /// # Errors
-    ///
-    /// From device API calls or visualizer msg send.
-    fn update(&mut self, msg: AppMsg) -> Result<()> {
-        match msg {
-            AppMsg::NoOp => Ok(()),
-            AppMsg::Quit => {
-                self.stop_album_art_watcher();
-                self.state = AppState::Done;
-                Ok(())
-            }
-            AppMsg::ScrollDown(k) => {
-                self.effect_list.state.scroll_down_by(k);
-                self.effect_list.scroll.pos = self.effect_list.scroll.pos.saturating_add(k);
-                self.effect_list.scroll.state = self
-                    .effect_list
-                    .scroll
-                    .state
-                    .position(self.effect_list.scroll.pos as usize);
-                Ok(())
-            }
-            AppMsg::ScrollUp(k) => {
-                self.effect_list.state.scroll_up_by(k);
-                self.effect_list.scroll.pos = self.effect_list.scroll.pos.saturating_sub(k);
-                self.effect_list.scroll.state = self
-                    .effect_list
-                    .scroll
-                    .state
-                    .position(self.effect_list.scroll.pos as usize);
-                Ok(())
-            }
-            AppMsg::ScrollToBottom => {
-                self.effect_list.state.select_last();
-                self.effect_list.scroll.pos = self.effect_list.list.len() as u16 - 1;
-                self.effect_list.scroll.state = self
-                    .effect_list
-                    .scroll
-                    .state
-                    .position(self.effect_list.scroll.pos as usize);
-                Ok(())
-            }
-            AppMsg::ScrollToTop => {
-                self.effect_list.state.select_first();
-                self.effect_list.scroll.pos = 0;
-                self.effect_list.scroll.state = self
-                    .effect_list
-                    .scroll
-                    .state
-                    .position(self.effect_list.scroll.pos as usize);
-                Ok(())
-            }
-            AppMsg::ChangeView(view) => {
-                self.prev_view = self.view;
-                self.view = view;
-                match self.view {
-                    AppView::Visualizer => {
-                        if !matches!(self.state, AppState::RunningVisualizer) {
-                            self.nl_device.request_udp_control()?;
-                            self.visualizer.tx.send(VisualizerMsg::Resume)?;
-                        }
-                        self.state = AppState::RunningVisualizer;
-                    }
-                    AppView::EffectList => {
-                        if !matches!(self.state, AppState::RunningEffectList) {
-                            self.visualizer.tx.send(VisualizerMsg::Pause)?;
-                        }
-                        self.state = AppState::RunningEffectList;
-                    }
-                    AppView::HelpScreen => (),
-                };
-                Ok(())
-            }
-            AppMsg::PlayEffect(i) => {
-                let effect_name = self.effect_list.list[i].name.as_str();
-                self.nl_device.play_effect(effect_name)?;
-                Ok(())
-            }
-            AppMsg::ChangeGain(delta) => {
-                self.visualizer.gain += delta;
-                self.visualizer
-                    .tx
-                    .send(VisualizerMsg::SetGain(self.visualizer.gain))?;
-                Ok(())
-            }
-            AppMsg::ChangePalette(index) => {
-                if index < self.visualizer.palette_names.len() {
-                    let palette_name = &self.visualizer.palette_names[index];
-                    if let Some(colors) = crate::palettes::get_palette(palette_name) {
-                        self.visualizer.current_palette_index = index;
-                        self.stop_album_art_watcher();
-                        if let Ok(mut state) = self.visualizer.viz_state.lock() {
-                            state.colors = colors.clone();
-                            state.track_title = None;
-                        }
-                        self.visualizer.tx.send(VisualizerMsg::SetPalette(colors))?;
-                    }
-                }
-                Ok(())
-            }
-            AppMsg::UseAlbumArtPalette => {
-                eprintln!("DEBUG app: UseAlbumArtPalette triggered");
-                if let Some(colors) = crate::now_playing::fetch_palette() {
-                    let title = crate::now_playing::get_track_title();
-                    if let Ok(mut state) = self.visualizer.viz_state.lock() {
-                        state.colors = colors.clone();
-                        state.track_title = title;
-                    }
-                    self.visualizer.tx.send(VisualizerMsg::SetPalette(colors))?;
-                    self.start_album_art_watcher();
-                }
-                Ok(())
-            }
-            AppMsg::CycleEffect => {
-                self.visualizer.effect = match self.visualizer.effect {
-                    Effect::Spectrum => Effect::EnergyWave,
-                    Effect::EnergyWave => Effect::Pulse,
-                    Effect::Pulse => Effect::Spectrum,
-                };
-                self.visualizer
-                    .tx
-                    .send(VisualizerMsg::SetEffect(self.visualizer.effect))?;
-                Ok(())
-            }
-            AppMsg::ResetPanels => {
-                self.visualizer.tx.send(VisualizerMsg::ResetPanels)?;
-                Ok(())
-            }
-            AppMsg::ToggleAxis => {
-                self.visualizer.primary_axis = match self.visualizer.primary_axis {
-                    Axis::X => Axis::Y,
-                    Axis::Y => Axis::X,
-                };
-                self.visualizer.tx.send(VisualizerMsg::SetSorting {
-                    primary_axis: self.visualizer.primary_axis,
-                    sort_primary: self.visualizer.sort_primary,
-                    sort_secondary: self.visualizer.sort_secondary,
-                    global_orientation: self.visualizer.global_orientation,
-                })?;
-                Ok(())
-            }
-            AppMsg::TogglePrimarySort => {
-                self.visualizer.sort_primary = match self.visualizer.sort_primary {
-                    Sort::Asc => Sort::Desc,
-                    Sort::Desc => Sort::Asc,
-                };
-                self.visualizer.tx.send(VisualizerMsg::SetSorting {
-                    primary_axis: self.visualizer.primary_axis,
-                    sort_primary: self.visualizer.sort_primary,
-                    sort_secondary: self.visualizer.sort_secondary,
-                    global_orientation: self.visualizer.global_orientation,
-                })?;
-                Ok(())
-            }
-            AppMsg::ToggleSecondarySort => {
-                self.visualizer.sort_secondary = match self.visualizer.sort_secondary {
-                    Sort::Asc => Sort::Desc,
-                    Sort::Desc => Sort::Asc,
-                };
-                self.visualizer.tx.send(VisualizerMsg::SetSorting {
-                    primary_axis: self.visualizer.primary_axis,
-                    sort_primary: self.visualizer.sort_primary,
-                    sort_secondary: self.visualizer.sort_secondary,
-                    global_orientation: self.visualizer.global_orientation,
-                })?;
-                Ok(())
+    fn stop_album_art_watcher(&mut self) {
+        if let Some(stop) = self.album_art_stop.take() {
+            stop.store(true, Ordering::Relaxed);
+        }
+        if let Ok(mut state) = self.viz_state.lock() {
+            state.track_title = None;
+            state.artwork_bytes = None;
+        }
+    }
+}
+
+// ── Free-standing controller drawing ─────────────────────────────────────
+
+fn draw_controller(
+    x: f32,
+    y: f32,
+    _panel: &PanelInfo,
+    scale: f32,
+    all_panels: &[PanelInfo],
+    transformed_positions: &[(f32, f32)],
+) {
+    // Find nearest parent light panel
+    let mut min_dist = f32::MAX;
+    let mut nearest_idx = 0;
+    for (i, other) in all_panels.iter().enumerate() {
+        if other.shape_type.side_length >= 1.0 {
+            let (ox, oy) = transformed_positions[i];
+            let dist = ((x - ox).powi(2) + (y - oy).powi(2)).sqrt();
+            if dist < min_dist {
+                min_dist = dist;
+                nearest_idx = i;
             }
         }
     }
 
-    /// Renders the active view (effect list, visualizer, or help) into the terminal frame.
-    ///
-    /// Creates bordered main block with device name in magenta left title, right-aligned "? for help".
-    /// Dispatches to view-specific rendering:
-    /// - `EffectList`: Stateful list of NlEffect items, optional colorful char styling via palette,
-    ///   highlight with >> symbol, synced scrollbar with padding.
-    /// - Other views (Visualizer/HelpScreen): Implementation details for spectrum display or key bindings.
-    /// - Updates scrollbar state post-render if needed.
-    fn render_view(&mut self, frame: &mut Frame) {
-        let main_block = Block::new()
-            .borders(Borders::ALL)
-            .title_top(
-                Line::from(vec![
-                    "Connected to ".into(),
-                    self.nl_device.name.as_str().magenta(),
-                ])
-                .left_aligned(),
-            )
-            .title_top(
-                Line::from(vec!["Press ".into(), "?".magenta(), " for help".into()])
-                    .right_aligned(),
-            );
-        match self.view {
-            AppView::EffectList => {
-                frame.render_stateful_widget(
-                    List::new(self.effect_list.list.iter().map(|x| {
-                        let name = x.name.as_str();
-                        if self.display_colors {
-                            ListItem::new(utils::colorful_effect_name(name, &x.palette))
-                        } else {
-                            ListItem::new(name)
-                        }
-                    }))
-                    .scroll_padding(2)
-                    .block(main_block)
-                    .highlight_style(Style::new().bold())
-                    .highlight_symbol(">> ")
-                    .highlight_spacing(HighlightSpacing::Always)
-                    .direction(ListDirection::TopToBottom),
-                    frame.area(),
-                    &mut self.effect_list.state,
-                );
-                self.effect_list.scroll.state = self
-                    .effect_list
-                    .scroll
-                    .state
-                    .content_length(self.effect_list.list.len());
-                frame.render_stateful_widget(
-                    Scrollbar::new(ScrollbarOrientation::VerticalRight)
-                        .track_symbol(Some("│"))
-                        .begin_symbol(Some("↑"))
-                        .end_symbol(Some("↓")),
-                    frame.area().inner(Margin {
-                        vertical: 1,
-                        horizontal: 0,
-                    }),
-                    &mut self.effect_list.scroll.state,
-                );
-            }
-            AppView::Visualizer => {
-                // Snapshot display state from shared VizState (also written by watcher thread).
-                let (current_palette_name, track_title, palette_colors) = {
-                    let state = self.visualizer.viz_state.lock().unwrap();
-                    let name = if state.track_title.is_some() {
-                        "album-art".to_string()
-                    } else if self.visualizer.current_palette_index
-                        < self.visualizer.palette_names.len()
-                    {
-                        self.visualizer.palette_names[self.visualizer.current_palette_index].clone()
-                    } else {
-                        "Unknown".to_string()
-                    };
-                    (name, state.track_title.clone(), state.colors.clone())
-                };
-                let current_palette = current_palette_name.as_str();
+    let (parent_x, parent_y) = transformed_positions[nearest_idx];
+    let parent = &all_panels[nearest_idx];
+    let dx = x - parent_x;
+    let dy = y - parent_y;
+    let angle_to_ctrl = dy.atan2(dx);
+    let num_sides = parent.shape_type.num_sides();
+    let parent_side = parent.shape_type.side_length * scale;
 
-                let effect_str = match self.visualizer.effect {
-                    Effect::Spectrum => "Spectrum",
-                    Effect::EnergyWave => "Energy Wave",
-                    Effect::Pulse => "Pulse",
-                };
+    let parent_radius = match num_sides {
+        3 => parent_side / f32::sqrt(3.0),
+        4 => parent_side / f32::sqrt(2.0),
+        _ => parent_side,
+    };
 
-                let axis_str = match self.visualizer.primary_axis {
-                    Axis::X => "X",
-                    Axis::Y => "Y",
-                };
-                let primary_str = match self.visualizer.sort_primary {
-                    Sort::Asc => "Asc",
-                    Sort::Desc => "Desc",
-                };
-                let secondary_str = match self.visualizer.sort_secondary {
-                    Sort::Asc => "Asc",
-                    Sort::Desc => "Desc",
-                };
+    let parent_ori = (parent.orientation as f32).to_radians();
+    let angle_per_side = 2.0 * PI / num_sides as f32;
 
-                // Build color swatch line: two spaces per color with background set.
-                let mut swatch_spans: Vec<Span> = vec!["Colors: ".into()];
-                for [r, g, b] in &palette_colors {
-                    swatch_spans.push(Span::styled(
-                        "  ",
-                        Style::default().bg(Color::Rgb(*r, *g, *b)),
-                    ));
-                    swatch_spans.push(" ".into());
-                }
+    let mut closest_edge = 0;
+    let mut min_angle_diff = f32::MAX;
+    for i in 0..num_sides {
+        let va = parent_ori + (i as f32 * angle_per_side);
+        let raw = (angle_to_ctrl - va).abs() % (2.0 * PI);
+        let diff = raw.min((2.0 * PI) - raw);
+        if diff < min_angle_diff {
+            min_angle_diff = diff;
+            closest_edge = i;
+        }
+    }
 
-                let mut lines = vec![
-                    Line::from("Music Visualizer".bold().cyan()),
-                    Line::from(""),
-                    Line::from(vec![
-                        "Amplitude gain: ".into(),
-                        format!("{:.2}", self.visualizer.gain).blue(),
-                    ]),
-                    Line::from(vec!["Current palette: ".into(), current_palette.green()]),
-                ];
-                if let Some(title) = &track_title {
-                    lines.push(Line::from(vec![
-                        "Now playing: ".into(),
-                        title.as_str().cyan().italic(),
-                    ]));
-                }
-                lines.push(Line::from(swatch_spans));
-                lines.extend([
-                    Line::from(vec!["Effect [E]: ".into(), effect_str.magenta()]),
-                    Line::from(""),
-                    Line::from("Panel Sorting:".bold()),
-                    Line::from(vec![
-                        "  Primary Axis [A]: ".into(),
-                        axis_str.yellow(),
-                        "  |  Primary [P]: ".into(),
-                        primary_str.yellow(),
-                        "  |  Secondary [S]: ".into(),
-                        secondary_str.yellow(),
-                    ]),
-                    Line::from(""),
-                    Line::from("Available Palettes (press number to switch):".bold()),
-                ]);
+    let v1a = parent_ori + (closest_edge as f32 * angle_per_side);
+    let v2a = parent_ori + ((closest_edge + 1) as f32 * angle_per_side);
+    let v1x = parent_x + parent_radius * v1a.cos();
+    let v1y = parent_y + parent_radius * v1a.sin();
+    let v2x = parent_x + parent_radius * v2a.cos();
+    let v2y = parent_y + parent_radius * v2a.sin();
 
-                for (i, palette_name) in self.visualizer.palette_names.iter().enumerate().take(10) {
-                    let key = if i == 9 {
-                        "0".to_string()
-                    } else {
-                        (i + 1).to_string()
-                    };
-                    let is_current = i == self.visualizer.current_palette_index;
-                    let line = if is_current {
-                        Line::from(vec![
-                            key.bold().yellow(),
-                            " - ".into(),
-                            palette_name.as_str().green().bold(),
-                            " ◀".green(),
-                        ])
-                    } else {
-                        Line::from(vec![key.bold(), " - ".into(), palette_name.as_str().into()])
-                    };
-                    lines.push(line);
-                }
+    let trap_h = 20.0;
+    let mid_x = (v1x + v2x) / 2.0;
+    let mid_y = (v1y + v2y) / 2.0;
+    let pdx = mid_x - parent_x;
+    let pdy = mid_y - parent_y;
+    let plen = (pdx * pdx + pdy * pdy).sqrt();
+    let pnx = pdx / plen;
+    let pny = pdy / plen;
+    let nr = 0.6;
 
-                frame.render_widget(
-                    Paragraph::new(lines).block(main_block).centered(),
-                    frame.area(),
-                );
-            }
-            AppView::HelpScreen => {
-                frame.render_widget(
-                    Paragraph::new(vec![
-                        Line::from("Keybinds:".bold()),
-                        Line::from(vec!["?".bold(), " - toggle help".into()]),
-                        Line::from(vec!["Q/Esc".bold(), " - quit".into()]),
-                        Line::from(vec!["g/G".bold(), " - go to the top/bottom of the list".into()]),
-                        Line::from(vec!["j/Down, k/Up".bold(), " - scroll down and up".into()]),
-                        Line::from(vec!["Enter".bold(), " - play selected effect".into()]),
-                        Line::from(vec!["V/v".bold(), " - toggle music visualizer mode".into()]),
-                        Line::from(vec!["-/+".bold(), " - decrease/increase gain (in visualizer mode)".into()]),
-                        Line::from(vec!["1-9, 0".bold(), " - switch color palette (in visualizer mode)".into()]),
-                        Line::from(vec!["A".bold(), " - toggle primary axis X/Y (in visualizer mode)".into()]),
-                        Line::from(vec!["P".bold(), " - toggle primary sort Asc/Desc (in visualizer mode)".into()]),
-                        Line::from(vec!["S".bold(), " - toggle secondary sort Asc/Desc (in visualizer mode)".into()]),
-                        Line::from(vec!["E".bold(), " - cycle visual effect: Spectrum / Energy Wave / Pulse (in visualizer mode)".into()]),
-                        Line::from(vec!["N".bold(), " - use album art colors from current track (in visualizer mode)".into()]),
-                        Line::from(vec!["R".bold(), " - reset all panels to black (in visualizer mode)".into()]),
-                        Line::from(vec!["(note that gain doesn't affect your music volume, only the visuals are amplified)".italic()]),
-                    ])
-                    .block(main_block)
-                    .centered(),
-                    frame.area(),
-                );
-            }
-        };
+    let verts = [
+        Vec2::new(v1x, v1y),
+        Vec2::new(v2x, v2y),
+        Vec2::new(
+            v2x + pnx * trap_h - (v2x - mid_x) * (1.0 - nr),
+            v2y + pny * trap_h - (v2y - mid_y) * (1.0 - nr),
+        ),
+        Vec2::new(
+            v1x + pnx * trap_h - (v1x - mid_x) * (1.0 - nr),
+            v1y + pny * trap_h - (v1y - mid_y) * (1.0 - nr),
+        ),
+    ];
+
+    let fill = Color::from_rgba(255, 200, 0, 255);
+    draw_triangle(verts[0], verts[1], verts[2], fill);
+    draw_triangle(verts[0], verts[2], verts[3], fill);
+
+    let outline = Color::from_rgba(200, 150, 0, 255);
+    for i in 0..4 {
+        let next = (i + 1) % 4;
+        draw_line(
+            verts[i].x,
+            verts[i].y,
+            verts[next].x,
+            verts[next].y,
+            2.0,
+            outline,
+        );
+    }
+
+    let ts = 10.0;
+    let td = sharp_measure(ts, "C");
+    let lx = (verts[0].x + verts[1].x + verts[2].x + verts[3].x) / 4.0;
+    let ly = (verts[0].y + verts[1].y + verts[2].y + verts[3].y) / 4.0;
+    sharp_text("C", lx - td.width / 2.0, ly + ts / 3.0, ts, BLACK);
+}
+
+// ── Sharp text helpers (DPI-aware via camera_font_scale) ─────────────────
+
+fn sharp_text(text: &str, x: f32, y: f32, logical_size: f32, color: Color) {
+    let (fs, sx, sy) = camera_font_scale(logical_size);
+    draw_text_ex(
+        text,
+        x,
+        y,
+        TextParams {
+            font_size: fs,
+            font_scale: sx,
+            font_scale_aspect: sy / sx,
+            color,
+            ..Default::default()
+        },
+    );
+}
+
+fn sharp_measure(logical_size: f32, text: &str) -> TextDimensions {
+    let (fs, sx, sy) = camera_font_scale(logical_size);
+    measure_text(text, None, fs, sx * (sy / sx))
+}
+
+// ── Window icon ──────────────────────────────────────────────────────────
+
+fn load_icon() -> miniquad::conf::Icon {
+    fn decode_rgba(png_bytes: &[u8], size: u32) -> Vec<u8> {
+        let img = image::load_from_memory(png_bytes)
+            .expect("embedded icon PNG is valid")
+            .resize_exact(size, size, image::imageops::FilterType::Lanczos3)
+            .into_rgba8();
+        img.into_raw()
+    }
+
+    let small = decode_rgba(include_bytes!("../Assets/icon_16.png"), 16);
+    let medium = decode_rgba(include_bytes!("../Assets/icon_32.png"), 32);
+    let big = decode_rgba(include_bytes!("../Assets/icon_64.png"), 64);
+
+    miniquad::conf::Icon {
+        small: small.try_into().expect("16x16 RGBA = 1024 bytes"),
+        medium: medium.try_into().expect("32x32 RGBA = 4096 bytes"),
+        big: big.try_into().expect("64x64 RGBA = 16384 bytes"),
     }
 }

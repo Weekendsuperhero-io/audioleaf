@@ -54,23 +54,6 @@ pub enum DumpType {
     LayoutGraphical,
 }
 
-#[derive(Debug, Serialize)]
-pub struct TuiConfig {
-    pub colorful_effect_names: Option<bool>,
-}
-
-impl TuiConfig {
-    /// Returns the default TUI configuration.
-    ///
-    /// Sets `colorful_effect_names` to the constant `DEFAULT_COLORFUL_EFFECT_NAMES` (typically false,
-    /// meaning effect names in the effect list are displayed without per-character coloring based on palette).
-    pub fn default() -> Self {
-        TuiConfig {
-            colorful_effect_names: Some(constants::DEFAULT_COLORFUL_EFFECT_NAMES),
-        }
-    }
-}
-
 #[derive(Copy, Clone, Debug, Default, Serialize)]
 pub enum Axis {
     X,
@@ -155,7 +138,6 @@ impl VisualizerConfig {
 #[derive(Debug, Serialize)]
 pub struct Config {
     pub default_nl_device_name: Option<String>,
-    pub tui_config: TuiConfig,
     pub visualizer_config: VisualizerConfig,
 }
 
@@ -167,46 +149,15 @@ impl Config {
     /// # Arguments
     ///
     /// * `default_nl_device_name` - Optional default Nanoleaf device name for quick selection.
-    /// * `tui_config` - Optional TUI settings; defaults to `TuiConfig::default()`.
     /// * `visualizer_config` - Optional visualizer params; defaults to `VisualizerConfig::default()`.
     pub fn new(
         default_nl_device_name: Option<String>,
-        tui_config: Option<TuiConfig>,
         visualizer_config: Option<VisualizerConfig>,
     ) -> Self {
         Config {
             default_nl_device_name,
-            tui_config: tui_config.unwrap_or(TuiConfig::default()),
             visualizer_config: visualizer_config.unwrap_or(VisualizerConfig::default()),
         }
-    }
-
-    /// Parses a TOML table into the fields of a mutable `TuiConfig`.
-    ///
-    /// Supports key "colorful_effect_names" as boolean value.
-    /// Ignores unknown keys? No, bails with error on invalid keys.
-    /// Updates `tui_config` in place.
-    ///
-    /// # Arguments
-    ///
-    /// * `tui_config` - Mutable reference to populate.
-    /// * `t` - TOML table from config section.
-    ///
-    /// # Errors
-    ///
-    /// `anyhow::Error` for invalid key types or unknown keys.
-    pub fn parse_tui_config(tui_config: &mut TuiConfig, t: toml::Table) -> Result<()> {
-        for (key, val) in t {
-            match (key.as_str(), val) {
-                ("colorful_effect_names", Value::Boolean(b)) => {
-                    tui_config.colorful_effect_names = Some(b);
-                }
-                (key, _) => {
-                    bail!(format!("invalid key `{}`", key));
-                }
-            }
-        }
-        Ok(())
     }
 
     /// Parses a TOML table into the fields of a mutable `VisualizerConfig`.
@@ -316,10 +267,12 @@ impl Config {
                     }
                 }
                 ("default_gain", Value::Float(x)) => {
+                    #[cfg(debug_assertions)]
                     eprintln!("DEBUG: Parsed default_gain as Float: {}", x);
                     visualizer_config.default_gain = Some(x as f32);
                 }
                 ("default_gain", Value::Integer(x)) => {
+                    #[cfg(debug_assertions)]
                     eprintln!("DEBUG: Parsed default_gain as Integer: {}", x);
                     visualizer_config.default_gain = Some(x as f32);
                 }
@@ -413,24 +366,24 @@ impl Config {
     ///
     /// File I/O errors, TOML deserialization failures, or validation bails.
     pub fn parse_from_file(path: &Path) -> Result<Self> {
+        #[cfg(debug_assertions)]
         eprintln!("DEBUG: Reading config from: {}", path.display());
         let mut config_file = File::open(path)?;
         let mut contents = String::new();
         config_file.read_to_string(&mut contents)?;
+        #[cfg(debug_assertions)]
         eprintln!("DEBUG: Config file contents:\n{}", contents);
         let data = contents.parse::<Table>()?;
 
         let mut default_nl_device_name = None;
-        let mut tui_config = TuiConfig::default();
         let mut visualizer_config = VisualizerConfig::default();
         for (key, val) in data {
             match (key.as_str(), val) {
                 ("default_nl_device_name", Value::String(s)) => {
                     default_nl_device_name = Some(s);
                 }
-                ("tui_config", Value::Table(t)) => {
-                    Self::parse_tui_config(&mut tui_config, t)?;
-                }
+                // Silently ignore legacy tui_config section for backwards compatibility
+                ("tui_config", Value::Table(_)) => {}
                 ("visualizer_config", Value::Table(t)) => {
                     Self::parse_visualizer_config(&mut visualizer_config, t)?;
                 }
@@ -439,11 +392,7 @@ impl Config {
                 }
             }
         }
-        Ok(Config::new(
-            default_nl_device_name,
-            Some(tui_config),
-            Some(visualizer_config),
-        ))
+        Ok(Config::new(default_nl_device_name, Some(visualizer_config)))
     }
 
     /// Serializes and writes the configuration to a TOML file at the given path.

@@ -1,20 +1,9 @@
 use anyhow::{Result, bail};
 use palette::{IntoColor, Oklch, Srgb};
-use ratatui::{
-    Terminal,
-    backend::CrosstermBackend,
-    crossterm::{
-        event::{self, Event},
-        execute,
-        terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-    },
-    style::{Color, Stylize},
-    text::Line,
-};
 use reqwest::blocking::Client;
 use std::{
     fmt::Display,
-    io::{self, Stdout, Write, stdout},
+    io::{self, Write},
     net::Ipv4Addr,
 };
 
@@ -97,55 +86,12 @@ pub fn get_ip_from_stdin() -> Result<Option<Ipv4Addr>> {
     }
 }
 
-/// Pauses execution until any key is pressed, with TUI-friendly handling.
+/// Pauses execution until the user presses Enter.
 ///
-/// Temporarily enables raw mode for crossterm event polling.
-/// Loops reading events until Key event received (any key).
-/// Disables raw mode, prints newline, used for user confirmation prompts (e.g., pairing mode).
+/// Used for user confirmation prompts (e.g., pairing mode).
 pub fn wait_for_any_key() -> Result<()> {
-    // Enable raw mode temporarily to detect key presses
-    enable_raw_mode()?;
-
-    // Wait for any key press using crossterm event handling
-    loop {
-        if let Event::Key(_) = event::read()? {
-            break;
-        }
-    }
-
-    // Disable raw mode and return to normal terminal
-    disable_raw_mode()?;
-    println!(); // Add newline after key press
-    Ok(())
-}
-
-/// Initializes the terminal user interface (TUI) environment.
-///
-/// Enables raw mode for input handling, enters alternate screen buffer,
-/// creates a new ratatui Terminal with CrosstermBackend on stdout.
-///
-/// Called before running the app TUI loop.
-///
-/// # Returns
-///
-/// `Result<Terminal<CrosstermBackend<Stdout>>>`.
-pub fn init_tui() -> Result<Terminal<CrosstermBackend<Stdout>>> {
-    enable_raw_mode()?;
-    execute!(stdout(), EnterAlternateScreen)?;
-    Terminal::new(CrosstermBackend::new(stdout())).map_err(anyhow::Error::from)
-}
-
-/// Cleans up the TUI environment after app exit.
-///
-/// Disables raw mode and leaves alternate screen to restore normal terminal state.
-/// Called after app run to prevent hanging or corrupted display.
-///
-/// # Errors
-///
-/// Propagates crossterm execution errors.
-pub fn destroy_tui() -> Result<(), anyhow::Error> {
-    disable_raw_mode()?;
-    execute!(stdout(), LeaveAlternateScreen)?;
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input)?;
     Ok(())
 }
 
@@ -295,22 +241,4 @@ pub fn equalize(a: f32, f: u32) -> f32 {
 /// Used for serializing values in Nanoleaf UDP protocol packets.
 pub fn split_into_bytes(x: u16) -> (u8, u8) {
     ((x / 256) as u8, (x % 256) as u8)
-}
-
-/// Creates a ratatui `Line` with effect name characters styled in cycling colors from a palette.
-///
-/// Splits string into individual chars, applies foreground color from `colors` array cycling by index.
-/// Used when `config.tui_config.colorful_effect_names` is true to highlight effect list items.
-pub fn colorful_effect_name<'a>(effect_name: &'a str, colors: &'a [Srgb<u8>]) -> Line<'a> {
-    let chars = effect_name.chars().map(|c| c.to_string());
-    Line::from(
-        chars
-            .into_iter()
-            .enumerate()
-            .map(|(i, c)| {
-                let color = colors[i % colors.len()];
-                c.fg(Color::Rgb(color.red, color.green, color.blue))
-            })
-            .collect::<Vec<_>>(),
-    )
 }

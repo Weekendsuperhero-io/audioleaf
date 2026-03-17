@@ -3,7 +3,7 @@ use crate::{
     constants, utils,
 };
 use anyhow::{Result, bail};
-use palette::{FromColor, Hsv, Oklch, Srgb};
+use palette::{FromColor, Oklch, Srgb};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::{
@@ -13,20 +13,11 @@ use std::{
     path::Path,
 };
 
-#[derive(Debug)]
-pub struct NlEffect {
-    pub name: String,
-    pub palette: Vec<Srgb<u8>>,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NlDevice {
     pub name: String,
     pub ip: Ipv4Addr,
     pub token: String,
-    #[serde(skip)]
-    #[serde(default)]
-    pub cur_effect_name: Option<String>,
 }
 
 /// wrapper struct for TOML serialization
@@ -58,7 +49,7 @@ impl NlDevice {
     ///
     /// # Returns
     ///
-    /// `Result<NlDevice>` with name, ip, token, optional cur_effect_name.
+    /// `Result<NlDevice>` with name, ip, and token.
     ///
     /// # Errors
     ///
@@ -66,13 +57,7 @@ impl NlDevice {
     pub fn new(ip: Ipv4Addr) -> Result<Self> {
         let token = Self::get_token(&ip)?;
         let name = Self::get_name(&ip, &token)?;
-        let cur_effect_name = Self::get_cur_effect_name(&ip, &token)?;
-        Ok(NlDevice {
-            name,
-            ip,
-            token,
-            cur_effect_name,
-        })
+        Ok(NlDevice { name, ip, token })
     }
 
     fn get_token(ip: &Ipv4Addr) -> Result<String> {
@@ -99,27 +84,6 @@ impl NlDevice {
         let res_json: serde_json::Value = serde_json::from_str(&res)?;
 
         Ok(String::from(res_json["name"].as_str().unwrap()))
-    }
-
-    pub fn get_cur_effect_name(ip: &Ipv4Addr, token: &str) -> Result<Option<String>> {
-        let Ok(res) = utils::request_get(&format!(
-            "http://{}:{}/api/v1/{}/effects/select",
-            ip,
-            constants::NL_API_PORT,
-            token
-        )) else {
-            bail!(utils::generate_connection_error_msg(ip));
-        };
-        let res_text: String = serde_json::from_str(&res)?;
-        if res_text == "*Solid*"
-            || res_text == "*Dynamic*"
-            || res_text == "*Static*"
-            || res_text == "*ExtControl*"
-        {
-            Ok(None)
-        } else {
-            Ok(Some(res_text))
-        }
     }
 
     /// Retrieves the panel layout configuration from the device API.
@@ -261,75 +225,6 @@ impl NlDevice {
         }
 
         Ok(panels)
-    }
-
-    pub fn get_effect_list(&self) -> Result<Vec<NlEffect>> {
-        let Ok(res) = utils::request_get(&format!(
-            "http://{}:{}/api/v1/{}/effects/effectsList",
-            self.ip,
-            constants::NL_API_PORT,
-            self.token
-        )) else {
-            bail!(utils::generate_connection_error_msg(&self.ip));
-        };
-        let res_list: Vec<String> = serde_json::from_str(&res)?;
-        let mut palettes = Vec::with_capacity(res_list.len());
-        for effect_name in res_list.iter() {
-            let data = json!({
-                "write": {
-                    "command": "request",
-                    "animName": effect_name,
-                }
-            });
-            let Ok(res) = utils::request_put(
-                &format!(
-                    "http://{}:{}/api/v1/{}/effects/effectsList",
-                    self.ip,
-                    constants::NL_API_PORT,
-                    self.token
-                ),
-                Some(&data),
-            ) else {
-                bail!(utils::generate_connection_error_msg(&self.ip));
-            };
-            let res_json: serde_json::Value = serde_json::from_str(&res)?;
-            let palette_json = res_json["palette"].as_array().unwrap();
-            let mut palette: Vec<Srgb<u8>> = Vec::new();
-            for color_json in palette_json.iter() {
-                let h = color_json["hue"].as_u64().unwrap() as f32;
-                let s = (color_json["saturation"].as_u64().unwrap() as f32) / 100.0;
-                let b = (color_json["brightness"].as_u64().unwrap() as f32) / 100.0;
-                palette.push(Srgb::from_color(Hsv::new_srgb(h, s, b)).into_format::<u8>());
-            }
-            palettes.push(palette);
-        }
-
-        Ok(res_list
-            .into_iter()
-            .zip(palettes)
-            .map(|x| NlEffect {
-                name: x.0,
-                palette: x.1,
-            })
-            .collect::<Vec<_>>())
-    }
-
-    pub fn play_effect(&self, effect_name: &str) -> Result<()> {
-        let data = json!({
-            "select": effect_name
-        });
-        let Ok(_) = utils::request_put(
-            &format!(
-                "http://{}:{}/api/v1/{}/effects",
-                self.ip,
-                constants::NL_API_PORT,
-                self.token
-            ),
-            Some(&data),
-        ) else {
-            bail!(utils::generate_connection_error_msg(&self.ip));
-        };
-        Ok(())
     }
 
     pub fn get_udp_socket(&self) -> Result<UdpSocket> {

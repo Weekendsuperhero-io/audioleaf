@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- Flat-top hexagons, radius 48 -->
+  <!-- Column spacing: 72 (1.5 * r), Row spacing: 83.1 (sqrt(3) * r) -->
+  <!-- Row offset: 41.55 (half row height) for hex grid -->
+
+  <!-- Column 1: 1 hexagon -->
+  <polygon points="90,256 114,214.4 162,214.4 186,256 162,297.6 114,297.6"
+    fill="#5b8a8a" stroke="#7ab0b0" stroke-width="2"/>
+
+  <!-- Column 2: 2 hexagons -->
+  <polygon points="162,214.4 186,172.8 234,172.8 258,214.4 234,256 186,256"
+    fill="#c27868" stroke="#d99888" stroke-width="2"/>
+  <polygon points="162,297.6 186,256 234,256 258,297.6 234,339.2 186,339.2"
+    fill="#8878a8" stroke="#a898c8" stroke-width="2"/>
+
+  <!-- Column 3: 3 hexagons -->
+  <polygon points="234,172.8 258,131.2 306,131.2 330,172.8 306,214.4 258,214.4"
+    fill="#b8a060" stroke="#d0b878" stroke-width="2"/>
+  <polygon points="234,256 258,214.4 306,214.4 330,256 306,297.6 258,297.6"
+    fill="#5b8a8a" stroke="#7ab0b0" stroke-width="2"/>
+  <polygon points="234,339.2 258,297.6 306,297.6 330,339.2 306,380.8 258,380.8"
+    fill="#c27868" stroke="#d99888" stroke-width="2"/>
+
+  <!-- Column 4: 4 hexagons -->
+  <polygon points="306,131.2 330,89.6 378,89.6 402,131.2 378,172.8 330,172.8"
+    fill="#8878a8" stroke="#a898c8" stroke-width="2"/>
+  <polygon points="306,214.4 330,172.8 378,172.8 402,214.4 378,256 330,256"
+    fill="#b8a060" stroke="#d0b878" stroke-width="2"/>
+  <polygon points="306,297.6 330,256 378,256 402,297.6 378,339.2 330,339.2"
+    fill="#5b8a8a" stroke="#7ab0b0" stroke-width="2"/>
+  <polygon points="306,380.8 330,339.2 378,339.2 402,380.8 378,422.4 330,422.4"
+    fill="#c27868" stroke="#d99888" stroke-width="2"/>
+</svg>

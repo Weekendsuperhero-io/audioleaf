@@ -5,7 +5,6 @@ mod app;
 mod audio;
 mod config;
 mod constants;
-mod event_handler;
 mod graphical_layout;
 mod layout_visualizer;
 mod nanoleaf;
@@ -50,7 +49,7 @@ async fn main_async() -> Result<()> {
     } = cli_options;
     let ((config_file_path, config_file_exists), (devices_file_path, devices_file_exists)) =
         config::resolve_paths(config_file_path, devices_file_path)?;
-    let (nl_device, tui_config, visualizer_config) = if !add_new && devices_file_exists {
+    let (nl_device, visualizer_config) = if !add_new && devices_file_exists {
         if config_file_exists {
             let config = config::Config::parse_from_file(&config_file_path)?;
             let name_to_search = if device_name.is_some() {
@@ -60,13 +59,13 @@ async fn main_async() -> Result<()> {
             };
             let nl_device =
                 nanoleaf::NlDevice::find_in_file(&devices_file_path, name_to_search.as_deref())?;
-            (nl_device, config.tui_config, config.visualizer_config)
+            (nl_device, config.visualizer_config)
         } else {
             let nl_device =
                 nanoleaf::NlDevice::find_in_file(&devices_file_path, device_name.as_deref())?;
-            let config = config::Config::new(Some(nl_device.name.clone()), None, None);
+            let config = config::Config::new(Some(nl_device.name.clone()), None);
             config.write_to_file(&config_file_path)?;
-            (nl_device, config.tui_config, config.visualizer_config)
+            (nl_device, config.visualizer_config)
         }
     } else {
         let ip = config::get_ip()?;
@@ -77,19 +76,17 @@ async fn main_async() -> Result<()> {
             config.default_nl_device_name = Some(nl_device.name.clone());
             config
         } else {
-            config::Config::new(Some(nl_device.name.clone()), None, None)
+            config::Config::new(Some(nl_device.name.clone()), None)
         };
         config.write_to_file(&config_file_path)?;
-        (nl_device, config.tui_config, config.visualizer_config)
+        (nl_device, config.visualizer_config)
     };
 
     // Ensure device is powered on and has brightness set
     nl_device.ensure_device_ready()?;
 
-    let mut app = app::App::new(nl_device, tui_config, visualizer_config)?;
-    let mut terminal = utils::init_tui()?;
-    app.run(&mut terminal)?;
-    utils::destroy_tui()?;
+    let app = app::App::new(nl_device, visualizer_config)?;
+    app.run();
     Ok(())
 }
 
