@@ -1,12 +1,12 @@
-/// Album art color extraction for the visualizer.
-///
-/// macOS: Uses ScriptingBridge.framework (via objc2) to query running media
-///   players directly through the ObjC bridge — no subprocess spawning.
-///   - Spotify: title, artist, artwork URL (downloaded via reqwest).
-///   - Apple Music: title, artist, raw artwork bytes from MusicArtwork.rawData.
-///   Falls back to osascript if ScriptingBridge fails.
-///
-/// Linux: Uses `playerctl` subprocess.
+//! Album art color extraction for the visualizer.
+//!
+//! macOS: Uses ScriptingBridge.framework (via objc2) to query running media
+//! players directly through the ObjC bridge — no subprocess spawning.
+//!   - Spotify: title, artist, artwork URL (downloaded via reqwest).
+//!   - Apple Music: title, artist, raw artwork bytes from MusicArtwork.rawData.
+//!   - Falls back to osascript if ScriptingBridge fails.
+//!
+//! Linux: Uses `playerctl` subprocess.
 
 /// Returns the title of the currently playing track.
 pub fn get_track_title() -> Option<String> {
@@ -189,14 +189,13 @@ mod macos {
             if player state is not playing then return "NOT_PLAYING"
             return artwork url of current track
         end tell"#;
-        if let Some(url) = run_osascript(script) {
-            if let Some(bytes) = reqwest::blocking::get(&url)
+        if let Some(url) = run_osascript(script)
+            && let Some(bytes) = reqwest::blocking::get(&url)
                 .ok()
                 .and_then(|r| r.bytes().ok())
                 .map(|b| b.to_vec())
-            {
-                return Some(bytes);
-            }
+        {
+            return Some(bytes);
         }
         // Apple Music: use iTunes Search API.
         let script = r#"tell application "System Events"
@@ -206,13 +205,13 @@ mod macos {
             if player state is not playing then return "NOT_PLAYING"
             return (name of current track) & " " & (artist of current track)
         end tell"#;
-        if let Some(query) = run_osascript(script) {
-            if let Some(url) = itunes_artwork_url(&query) {
-                return reqwest::blocking::get(&url)
-                    .ok()
-                    .and_then(|r| r.bytes().ok())
-                    .map(|b| b.to_vec());
-            }
+        if let Some(query) = run_osascript(script)
+            && let Some(url) = itunes_artwork_url(&query)
+        {
+            return reqwest::blocking::get(&url)
+                .ok()
+                .and_then(|r| r.bytes().ok())
+                .map(|b| b.to_vec());
         }
         None
     }
@@ -270,7 +269,7 @@ mod macos {
         // top 4 that aren't near-black — these are the actual dominant
         // colors of the album art, not theme-scored "interesting" picks.
         let mut swatches = palette.swatches().to_vec();
-        swatches.sort_by(|a, b| b.population().cmp(&a.population()));
+        swatches.sort_by_key(|s| std::cmp::Reverse(s.population()));
         let colors: Vec<[u8; 3]> = swatches
             .iter()
             .filter(|s| s.color().to_oklch().l > 0.15)
@@ -332,7 +331,7 @@ mod linux {
         let image_data = ImageData::new(rgba.width(), rgba.height(), rgba.as_raw()).ok()?;
         let palette: Palette<f64> = Palette::extract(&image_data).ok()?;
         let mut swatches = palette.swatches().to_vec();
-        swatches.sort_by(|a, b| b.population().cmp(&a.population()));
+        swatches.sort_by_key(|s| std::cmp::Reverse(s.population()));
         let colors: Vec<[u8; 3]> = swatches
             .iter()
             .filter(|s| s.color().to_oklch().l > 0.15)

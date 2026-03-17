@@ -52,10 +52,11 @@ pub fn choose_ip(v: &[impl Display]) -> Result<Choice> {
         let mut input = String::new();
         match io::stdin().read_line(&mut input) {
             Ok(_) => {
-                if let Ok(x) = input.trim().parse::<usize>() {
-                    if x >= 1 && x <= n {
-                        return Ok(Choice::Automatic(x - 1));
-                    }
+                if let Ok(x) = input.trim().parse::<usize>()
+                    && x >= 1
+                    && x <= n
+                {
+                    return Ok(Choice::Automatic(x - 1));
                 }
                 if input.trim() == "M" {
                     return Ok(Choice::Manual);

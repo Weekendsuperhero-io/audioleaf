@@ -146,8 +146,8 @@ impl Visualizer {
         event: VisualizerMsg,
         base_colors: &mut Vec<Oklch>,
         brightness: &mut Vec<f32>,
-        prev_max: &mut Vec<f32>,
-        speed: &mut Vec<f32>,
+        prev_max: &mut [f32],
+        speed: &mut [f32],
     ) {
         match event {
             VisualizerMsg::Resume => self.state = VisualizerState::Running,
@@ -372,7 +372,11 @@ impl Visualizer {
                     .zip(brightness.iter())
                     .map(|(base, &b)| Oklch::new(base.l * b, base.chroma, base.hue))
                     .collect();
-                if let Err(_) = self.nl_udp.update_panels(&display_colors, self.trans_time) {
+                if self
+                    .nl_udp
+                    .update_panels(&display_colors, self.trans_time)
+                    .is_err()
+                {
                     // UDP send failed (e.g. extControl timed out) — re-request and retry once
                     if self.nl_device.request_udp_control().is_ok() {
                         let _ = self.nl_udp.update_panels(&display_colors, self.trans_time);
