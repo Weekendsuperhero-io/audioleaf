@@ -8,24 +8,25 @@ use crate::{
 use anyhow::Result;
 use cpal::{InputCallbackInfo, SampleFormat, SizedSample, traits::*};
 use dasp_sample::conv::ToSample;
-use palette::Oklch;
+use palette::{FromColor, Oklch, Srgb};
 use std::{
-    sync::mpsc::{self, TryRecvError},
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, TryRecvError},
+    },
     thread,
 };
 
 #[derive(Debug, Default)]
 enum VisualizerState {
     #[default]
-    Paused,
     Running,
     Done,
 }
 
 #[derive(Debug)]
 pub enum VisualizerMsg {
-    Pause,
-    Resume,
     End,
     SetGain(f32),
     SetPalette(Vec<[u8; 3]>),
@@ -51,6 +52,7 @@ pub struct Visualizer {
     max_freq: u16,
     hues: Vec<[u8; 3]>,
     effect: Effect,
+    shared_colors: Arc<Mutex<HashMap<u16, [u8; 3]>>>,
 }
 
 impl Visualizer {
@@ -76,6 +78,7 @@ impl Visualizer {
         config: VisualizerConfig,
         audio_stream: AudioStream,
         nl_device: &NlDevice,
+        shared_colors: Arc<Mutex<HashMap<u16, [u8; 3]>>>,
     ) -> Result<Self> {
         let state = VisualizerState::default();
         let mut nl_udp = nanoleaf::NlUdp::new(nl_device)?;
@@ -115,6 +118,7 @@ impl Visualizer {
             max_freq,
             hues,
             effect,
+            shared_colors,
         })
     }
 
@@ -150,8 +154,6 @@ impl Visualizer {
         speed: &mut [f32],
     ) {
         match event {
-            VisualizerMsg::Resume => self.state = VisualizerState::Running,
-            VisualizerMsg::Pause => self.state = VisualizerState::Paused,
             VisualizerMsg::End => self.state = VisualizerState::Done,
             VisualizerMsg::SetGain(gain) => self.gain = gain,
             VisualizerMsg::SetEffect(effect) => {
@@ -301,32 +303,22 @@ impl Visualizer {
             // Clear any colors left over from a previous Nanoleaf scene or effect
             self.send_black_frame(n);
             loop {
-                match self.state {
-                    VisualizerState::Done => break,
-                    VisualizerState::Paused => {
-                        let event = rx_events.recv().expect("events sender disconnected");
-                        self.update_state(
-                            event,
-                            &mut base_colors,
-                            &mut brightness,
-                            &mut prev_max,
-                            &mut speed,
-                        );
-                    }
-                    VisualizerState::Running => match rx_events.try_recv() {
-                        Ok(event) => self.update_state(
-                            event,
-                            &mut base_colors,
-                            &mut brightness,
-                            &mut prev_max,
-                            &mut speed,
-                        ),
-                        Err(err) => {
-                            if err == TryRecvError::Disconnected {
-                                panic!("events sender disconnected");
-                            }
+                if matches!(self.state, VisualizerState::Done) {
+                    break;
+                }
+                match rx_events.try_recv() {
+                    Ok(event) => self.update_state(
+                        event,
+                        &mut base_colors,
+                        &mut brightness,
+                        &mut prev_max,
+                        &mut speed,
+                    ),
+                    Err(err) => {
+                        if err == TryRecvError::Disconnected {
+                            panic!("events sender disconnected");
                         }
-                    },
+                    }
                 }
                 let to_collect = ((sample_rate as f32) * self.time_window).round() as usize;
                 let mut samples = Vec::with_capacity(2 * to_collect);
@@ -380,6 +372,19 @@ impl Visualizer {
                     // UDP send failed (e.g. extControl timed out) — re-request and retry once
                     if self.nl_device.request_udp_control().is_ok() {
                         let _ = self.nl_udp.update_panels(&display_colors, self.trans_time);
+                    }
+                }
+                // Share display colors with the graphical UI for panel preview
+                // Clamp to sRGB gamut before converting to u8 to avoid
+                // wrap-around artifacts from out-of-gamut Oklch values
+                if let Ok(mut map) = self.shared_colors.lock() {
+                    map.clear();
+                    for (i, color) in display_colors.iter().enumerate() {
+                        let srgb: Srgb<f32> = Srgb::from_color(*color);
+                        let r = (srgb.red.clamp(0.0, 1.0) * 255.0) as u8;
+                        let g = (srgb.green.clamp(0.0, 1.0) * 255.0) as u8;
+                        let b = (srgb.blue.clamp(0.0, 1.0) * 255.0) as u8;
+                        map.insert(self.nl_udp.panels[i].id, [r, g, b]);
                     }
                 }
             }
