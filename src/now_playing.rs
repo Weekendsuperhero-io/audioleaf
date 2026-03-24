@@ -58,7 +58,7 @@ pub fn fetch_artwork_and_palette() -> Option<(Vec<u8>, Vec<[u8; 3]>)> {
 #[cfg(target_os = "macos")]
 mod macos {
     use objc2::msg_send;
-    use objc2::rc::Retained;
+    use objc2::rc::{Retained, autoreleasepool};
     use objc2::runtime::{AnyClass, AnyObject};
     use objc2_foundation::NSString;
 
@@ -66,11 +66,13 @@ mod macos {
     unsafe extern "C" {}
 
     pub fn get_track_title() -> Option<String> {
-        sb_spotify_title().or_else(sb_apple_music_title)
+        // Wrap in an autorelease pool so ObjC autoreleased objects from
+        // ScriptingBridge calls are freed when the pool drains.
+        autoreleasepool(|_| sb_spotify_title().or_else(sb_apple_music_title))
     }
 
     pub fn fetch_artwork_bytes() -> Option<Vec<u8>> {
-        sb_spotify_artwork().or_else(sb_apple_music_artwork)
+        autoreleasepool(|_| sb_spotify_artwork().or_else(sb_apple_music_artwork))
     }
 
     // ── ScriptingBridge helpers ───────────────────────────────────────────────

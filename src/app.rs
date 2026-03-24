@@ -22,6 +22,9 @@ struct VizState {
     colors: Vec<[u8; 3]>,
     track_title: Option<String>,
     artwork_bytes: Option<Vec<u8>>,
+    /// Incremented each time artwork_bytes changes, so the UI can detect updates
+    /// without cloning the bytes every frame.
+    artwork_generation: u64,
 }
 
 pub struct App {
@@ -36,6 +39,11 @@ pub struct App {
 
     // Settings
     gain: f32,
+    time_window: f32,
+    transition_time: u16,
+    min_freq: u16,
+    max_freq: u16,
+    freq_preset_index: usize,
     current_palette_index: usize,
     palette_names: Vec<String>,
     effect: Effect,
@@ -51,8 +59,8 @@ pub struct App {
     viz_state: Arc<Mutex<VizState>>,
     album_art_stop: Option<Arc<AtomicBool>>,
     album_art_texture: Option<Texture2D>,
-    /// Tracks which artwork bytes we've already loaded into the texture
-    loaded_artwork_len: usize,
+    /// Tracks which artwork generation we've already loaded into the texture
+    loaded_artwork_gen: u64,
 }
 
 impl App {
@@ -78,6 +86,15 @@ impl App {
         let sort_primary = visualizer_config.sort_primary.unwrap_or_default();
         let sort_secondary = visualizer_config.sort_secondary.unwrap_or_default();
         let effect = visualizer_config.effect.unwrap_or_default();
+        let (min_freq, max_freq) = visualizer_config
+            .freq_range
+            .unwrap_or(constants::DEFAULT_FREQ_RANGE);
+        let time_window = visualizer_config
+            .time_window
+            .unwrap_or(constants::DEFAULT_TIME_WINDOW);
+        let transition_time = visualizer_config
+            .transition_time
+            .unwrap_or(constants::DEFAULT_TRANSITION_TIME);
 
         let initial_colors = visualizer_config
             .colors
@@ -106,6 +123,7 @@ impl App {
             colors: initial_colors,
             track_title: None,
             artwork_bytes: None,
+            artwork_generation: 0,
         }));
 
         nl_device.request_udp_control()?;
@@ -117,6 +135,14 @@ impl App {
             visualizer_tx: tx,
             shared_colors,
             gain,
+            time_window,
+            transition_time,
+            min_freq,
+            max_freq,
+            freq_preset_index: constants::FREQ_RANGE_PRESETS
+                .iter()
+                .position(|&(lo, hi, _)| lo == min_freq && hi == max_freq)
+                .unwrap_or(0),
             current_palette_index: 0,
             palette_names,
             effect,
@@ -128,7 +154,7 @@ impl App {
             viz_state,
             album_art_stop: None,
             album_art_texture: None,
-            loaded_artwork_len: 0,
+            loaded_artwork_gen: 0,
         })
     }
 
@@ -210,6 +236,38 @@ impl App {
                 'n' | 'N' => self.use_album_art_palette(),
                 'r' | 'R' => {
                     let _ = self.visualizer_tx.send(VisualizerMsg::ResetPanels);
+                }
+                '[' => {
+                    self.time_window = (self.time_window - 0.025).max(0.05);
+                    let _ = self
+                        .visualizer_tx
+                        .send(VisualizerMsg::SetTimeWindow(self.time_window));
+                }
+                ']' => {
+                    self.time_window = (self.time_window + 0.025).min(0.5);
+                    let _ = self
+                        .visualizer_tx
+                        .send(VisualizerMsg::SetTimeWindow(self.time_window));
+                }
+                ',' => {
+                    self.transition_time = self.transition_time.saturating_sub(1);
+                    let _ = self
+                        .visualizer_tx
+                        .send(VisualizerMsg::SetTransitionTime(self.transition_time));
+                }
+                '.' => {
+                    self.transition_time = (self.transition_time + 1).min(10);
+                    let _ = self
+                        .visualizer_tx
+                        .send(VisualizerMsg::SetTransitionTime(self.transition_time));
+                }
+                'f' | 'F' => {
+                    self.freq_preset_index =
+                        (self.freq_preset_index + 1) % constants::FREQ_RANGE_PRESETS.len();
+                    let (lo, hi, _) = constants::FREQ_RANGE_PRESETS[self.freq_preset_index];
+                    self.min_freq = lo;
+                    self.max_freq = hi;
+                    let _ = self.visualizer_tx.send(VisualizerMsg::SetFreqRange(lo, hi));
                 }
                 ' ' => self.show_visualization = !self.show_visualization,
                 _ => {}
@@ -363,27 +421,39 @@ impl App {
     // ── Album art texture ─────────────────────────────────────────────────
 
     fn update_album_art_texture(&mut self) {
-        let bytes_opt = self
-            .viz_state
-            .lock()
-            .ok()
-            .and_then(|s| s.artwork_bytes.clone());
-        if let Some(bytes) = bytes_opt {
-            // Only reload if the bytes actually changed
-            if bytes.len() != self.loaded_artwork_len {
+        // Check the generation counter without cloning the (potentially large) bytes.
+        // Only lock briefly to read the generation and, if changed, take the bytes.
+        let update = self.viz_state.lock().ok().and_then(|s| {
+            if s.artwork_bytes.is_some() && s.artwork_generation != self.loaded_artwork_gen {
+                // Only clone when the artwork actually changed (not every frame)
+                Some((s.artwork_bytes.clone(), s.artwork_generation))
+            } else if s.artwork_bytes.is_none() && self.album_art_texture.is_some() {
+                Some((None, s.artwork_generation))
+            } else {
+                None
+            }
+        });
+
+        if let Some((bytes_opt, generation)) = update {
+            if let Some(bytes) = bytes_opt {
                 if let Ok(img) = image::load_from_memory(&bytes) {
                     let rgba = img.to_rgba8();
                     let (w, h) = (rgba.width() as u16, rgba.height() as u16);
                     let tex = Texture2D::from_rgba8(w, h, rgba.as_raw());
                     tex.set_filter(FilterMode::Linear);
+                    // Free the old GPU texture before replacing
+                    if let Some(old) = self.album_art_texture.take() {
+                        drop(old);
+                    }
                     self.album_art_texture = Some(tex);
                 }
-                self.loaded_artwork_len = bytes.len();
+            } else {
+                // Artwork cleared (switched to named palette)
+                if let Some(old) = self.album_art_texture.take() {
+                    drop(old);
+                }
             }
-        } else if self.album_art_texture.is_some() {
-            // Artwork cleared (switched to named palette)
-            self.album_art_texture = None;
-            self.loaded_artwork_len = 0;
+            self.loaded_artwork_gen = generation;
         }
     }
 
@@ -457,23 +527,38 @@ impl App {
             (name, state.track_title.clone())
         };
 
+        let freq_label = constants::FREQ_RANGE_PRESETS
+            .iter()
+            .find(|&&(lo, hi, _)| lo == self.min_freq && hi == self.max_freq)
+            .map(|&(_, _, name)| name)
+            .unwrap_or("Custom");
         let effect_text = format!("Effect: {}  |  Gain: {:.2}", effect_str, self.gain);
+        let audio_text = format!(
+            "Window: {:.0}ms  |  Transition: {}ms  |  Freq: {} ({}-{}Hz)",
+            self.time_window * 1000.0,
+            self.transition_time as u32 * 100,
+            freq_label,
+            self.min_freq,
+            self.max_freq,
+        );
         let mut palette_text = format!("Palette: {}", palette_name);
         if let Some(title) = &track_title {
             palette_text.push_str(&format!("  |  Now playing: {}", title));
         }
 
         let big = 26.0;
+        let small = 20.0;
         let em = sharp_measure(big, &effect_text);
+        let am = sharp_measure(small, &audio_text);
         let pm = sharp_measure(big, &palette_text);
-        let box_w = em.width.max(pm.width) + 14.0;
+        let box_w = em.width.max(pm.width).max(am.width) + 14.0;
 
         // Color swatches measurement
         let colors = self.viz_state.lock().unwrap().colors.clone();
         let swatch_total_w = 22.0 * colors.len() as f32;
         let box_w = box_w.max(swatch_total_w + 80.0);
 
-        let box_h = big * 2.0 + 30.0 + 18.0; // two text lines + swatch row + padding
+        let box_h = big * 2.0 + small + 34.0 + 18.0; // three text lines + swatch row + padding
         let box_y = sh - box_h - 5.0;
 
         draw_rectangle(5.0, box_y, box_w, box_h, Color::from_rgba(0, 0, 0, 160));
@@ -481,17 +566,26 @@ impl App {
         let line1_y = box_y + big + 4.0;
         sharp_text(&effect_text, 12.0, line1_y, big, WHITE);
 
-        let line2_y = line1_y + big + 4.0;
+        let line2_y = line1_y + small + 4.0;
+        sharp_text(
+            &audio_text,
+            12.0,
+            line2_y,
+            small,
+            Color::from_rgba(180, 180, 220, 255),
+        );
+
+        let line3_y = line2_y + big + 4.0;
         sharp_text(
             &palette_text,
             12.0,
-            line2_y,
+            line3_y,
             big,
             Color::from_rgba(100, 255, 100, 255),
         );
 
         // Color swatches
-        let swatch_y = line2_y + 8.0;
+        let swatch_y = line3_y + 8.0;
         let mut sx = 12.0;
         for [r, g, b] in &colors {
             draw_rectangle(sx, swatch_y, 18.0, 14.0, Color::from_rgba(*r, *g, *b, 255));
@@ -562,7 +656,7 @@ impl App {
         );
 
         // ── Bottom-center: controls hint ──
-        let hint = "? help | ESC quit | Space preview | -/+ gain | 1-0 palette | E effect | N album art | R reset";
+        let hint = "? help | ESC quit | Space preview | -/+ gain | [/] window | ,/. transition | F freq | 1-0 palette | E effect | N album art";
         let hm = sharp_measure(14.0, hint);
         let hx = (sw - hm.width) / 2.0;
         sharp_text(
@@ -591,6 +685,9 @@ impl App {
             ("?", "Toggle this help"),
             ("Space", "Toggle panel visualization preview"),
             ("-  /  +", "Decrease / increase gain"),
+            ("[  /  ]", "Decrease / increase sample time window"),
+            (",  /  .", "Decrease / increase transition time"),
+            ("F", "Cycle frequency range preset"),
             ("1-9, 0", "Switch color palette"),
             ("E", "Cycle effect: Spectrum / Energy Wave / Pulse"),
             ("A", "Toggle primary axis (X / Y)"),
@@ -692,6 +789,7 @@ impl App {
                     state.colors = colors.clone();
                     state.track_title = title;
                     state.artwork_bytes = Some(artwork);
+                    state.artwork_generation += 1;
                 }
                 let _ = tx.send(VisualizerMsg::SetPalette(colors));
             }
@@ -712,6 +810,7 @@ impl App {
                             state.colors = colors.clone();
                             state.track_title = title;
                             state.artwork_bytes = Some(artwork);
+                            state.artwork_generation += 1;
                         }
                         let _ = tx.send(VisualizerMsg::SetPalette(colors));
                     }

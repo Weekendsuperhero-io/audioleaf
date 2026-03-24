@@ -32,6 +32,9 @@ pub enum VisualizerMsg {
     SetPalette(Vec<[u8; 3]>),
     SetEffect(Effect),
     ResetPanels,
+    SetTimeWindow(f32),
+    SetTransitionTime(u16),
+    SetFreqRange(u16, u16),
     SetSorting {
         primary_axis: crate::config::Axis,
         sort_primary: crate::config::Sort,
@@ -171,6 +174,12 @@ impl Visualizer {
                 brightness.fill(0.0);
                 // Immediately send a black frame so the old palette's colors don't linger
                 self.send_black_frame(base_colors.len());
+            }
+            VisualizerMsg::SetTimeWindow(tw) => self.time_window = tw,
+            VisualizerMsg::SetTransitionTime(tt) => self.trans_time = tt,
+            VisualizerMsg::SetFreqRange(min, max) => {
+                self.min_freq = min;
+                self.max_freq = max;
             }
             VisualizerMsg::ResetPanels => {
                 brightness.fill(0.0);
