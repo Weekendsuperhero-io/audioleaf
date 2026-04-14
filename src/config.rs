@@ -100,7 +100,7 @@ pub struct VisualizerConfig {
     pub effect: Option<Effect>,
 }
 
-impl VisualizerConfig {
+impl Default for VisualizerConfig {
     /// Returns the default visualizer configuration.
     ///
     /// Initializes with constants:
@@ -111,7 +111,7 @@ impl VisualizerConfig {
     /// - `transition_time`: 2 (200ms)
     /// - `time_window`: 0.1875 s
     /// - Sorting: Y axis ascending, secondary ascending
-    pub fn default() -> Self {
+    fn default() -> Self {
         VisualizerConfig {
             audio_backend: Some("default".to_string()),
             freq_range: Some(constants::DEFAULT_FREQ_RANGE),
@@ -156,7 +156,7 @@ impl Config {
     ) -> Self {
         Config {
             default_nl_device_name,
-            visualizer_config: visualizer_config.unwrap_or(VisualizerConfig::default()),
+            visualizer_config: visualizer_config.unwrap_or_default(),
         }
     }
 

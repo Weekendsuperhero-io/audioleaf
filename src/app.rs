@@ -357,12 +357,12 @@ impl App {
 
         // Snapshot visualization colors with smooth interpolation
         let vis_colors = if self.show_visualization {
-            if let Ok(map) = self.shared_colors.lock() {
-                if *map != self.target_colors {
-                    self.prev_colors = self.interpolated_colors();
-                    self.target_colors = map.clone();
-                    self.color_transition_start = Instant::now();
-                }
+            if let Ok(map) = self.shared_colors.lock()
+                && *map != self.target_colors
+            {
+                self.prev_colors = self.interpolated_colors();
+                self.target_colors = map.clone();
+                self.color_transition_start = Instant::now();
             }
             Some(self.interpolated_colors())
         } else {
