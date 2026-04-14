@@ -229,7 +229,7 @@ impl Visualizer {
                     .fold(f32::NEG_INFINITY, f32::max),
             );
         }
-        tx.send(samples).expect("sending samples failed");
+        let _ = tx.send(samples);
     }
 
     /// Creates a closure suitable for CPAL `build_input_stream` callback.
@@ -271,21 +271,20 @@ impl Visualizer {
             let (tx_audio, rx_audio) = mpsc::channel();
             macro_rules! build_input_stream {
                 ($type:ty) => {
-                    self.audio_stream
-                        .device
-                        .build_input_stream(
-                            &self.audio_stream.stream_config,
-                            Self::create_data_callback::<$type>(
-                                self.audio_stream.stream_config.channels as usize,
-                                tx_audio,
-                            ),
-                            move |_| panic!("building the audio stream failed"),
-                            None,
-                        )
-                        .expect("stream initialization failed")
+                    self.audio_stream.device.build_input_stream(
+                        &self.audio_stream.stream_config,
+                        Self::create_data_callback::<$type>(
+                            self.audio_stream.stream_config.channels as usize,
+                            tx_audio.clone(),
+                        ),
+                        move |err| {
+                            eprintln!("WARNING: audio input stream callback error: {}", err);
+                        },
+                        None,
+                    )
                 };
             }
-            let stream = match self.audio_stream.sample_format {
+            let stream_result = match self.audio_stream.sample_format {
                 SampleFormat::I8 => build_input_stream!(i8),
                 SampleFormat::I16 => build_input_stream!(i16),
                 SampleFormat::I32 => build_input_stream!(i32),
@@ -296,9 +295,25 @@ impl Visualizer {
                 SampleFormat::U64 => build_input_stream!(u64),
                 SampleFormat::F32 => build_input_stream!(f32),
                 SampleFormat::F64 => build_input_stream!(f64),
-                _ => panic!("unsupported sample format"),
+                _ => {
+                    eprintln!(
+                        "WARNING: Unsupported sample format for live visualizer: {:?}",
+                        self.audio_stream.sample_format
+                    );
+                    return;
+                }
             };
-            stream.play().expect("running the audio stream failed");
+            let stream = match stream_result {
+                Ok(stream) => stream,
+                Err(err) => {
+                    eprintln!("WARNING: stream initialization failed: {}", err);
+                    return;
+                }
+            };
+            if let Err(err) = stream.play() {
+                eprintln!("WARNING: running the audio stream failed: {}", err);
+                return;
+            }
 
             let n = self.nl_udp.panels.len();
             let sample_rate = self.audio_stream.stream_config.sample_rate;
@@ -325,14 +340,25 @@ impl Visualizer {
                     ),
                     Err(err) => {
                         if err == TryRecvError::Disconnected {
-                            panic!("events sender disconnected");
+                            eprintln!(
+                                "WARNING: visualizer events channel disconnected; stopping thread."
+                            );
+                            break;
                         }
                     }
                 }
                 let to_collect = ((sample_rate as f32) * self.time_window).round() as usize;
                 let mut samples = Vec::with_capacity(2 * to_collect);
                 while samples.len() < to_collect {
-                    let mut new_samples = rx_audio.recv().expect("receiving samples failed");
+                    let mut new_samples = match rx_audio.recv() {
+                        Ok(samples) => samples,
+                        Err(_) => {
+                            eprintln!(
+                                "WARNING: audio sample channel disconnected; stopping thread."
+                            );
+                            return;
+                        }
+                    };
                     samples.append(&mut new_samples);
                 }
                 let spectrum = processing::process(samples, self.gain);
