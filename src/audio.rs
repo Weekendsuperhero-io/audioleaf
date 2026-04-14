@@ -1,6 +1,7 @@
 use crate::constants;
 use anyhow::{Result, bail};
 use cpal::{Device, SampleFormat, StreamConfig, traits::*};
+use std::collections::HashMap;
 
 pub struct AudioStream {
     pub device: Device,
@@ -33,6 +34,7 @@ impl AudioStream {
             None => constants::DEFAULT_AUDIO_BACKEND,
         };
         let host = cpal::default_host();
+        let input_devices = enumerate_input_devices(&host)?;
 
         // Try to find the device in input devices (for loopback/monitor devices)
         let device = match device_name {
@@ -50,16 +52,12 @@ impl AudioStream {
                 ];
 
                 let mut loopback_device = None;
-                if let Ok(devices) = host.input_devices() {
-                    for device in devices {
-                        if let Ok(name) = device.description().map(|d| d.name().to_string())
-                            && loopback_names.iter().any(|lb| name.contains(lb))
-                        {
-                            #[cfg(debug_assertions)]
-                            eprintln!("INFO: Found loopback device: {}", name);
-                            loopback_device = Some(device);
-                            break;
-                        }
+                for (device, raw_name, _) in &input_devices {
+                    if loopback_names.iter().any(|lb| raw_name.contains(lb)) {
+                        #[cfg(debug_assertions)]
+                        eprintln!("INFO: Found loopback device: {}", raw_name);
+                        loopback_device = Some(device.clone());
+                        break;
                     }
                 }
 
@@ -70,24 +68,14 @@ impl AudioStream {
                     host.default_input_device()
                 })
             }
-            _ => host.input_devices()?.find(|x| {
-                x.description()
-                    .map(|d| d.name() == device_name)
-                    .unwrap_or(false)
-            }),
+            _ => select_input_device(&input_devices, device_name).map(|(device, _, _)| device),
         };
 
         let Some(device) = device else {
             bail!(format!(
                 "Audio backend `{}` not found, available options: {}",
                 device_name,
-                host.input_devices()?
-                    .map(|dev| dev
-                        .description()
-                        .map(|d| d.name().to_string())
-                        .unwrap_or_default())
-                    .collect::<Vec<_>>()
-                    .join(", ")
+                list_input_backend_names()?.join(", ")
             ));
         };
         let audio_config = device.default_input_config()?;
@@ -100,4 +88,92 @@ impl AudioStream {
             stream_config,
         })
     }
+}
+
+/// Returns input backend names with stable disambiguation suffixes for duplicates.
+///
+/// Example:
+/// - "Loopback, Loopback PCM [#1]"
+/// - "Loopback, Loopback PCM [#2]"
+pub fn list_input_backend_names() -> Result<Vec<String>> {
+    let host = cpal::default_host();
+    let devices = enumerate_input_devices(&host)?;
+    Ok(devices.into_iter().map(|(_, _, display)| display).collect())
+}
+
+fn enumerate_input_devices(host: &cpal::Host) -> Result<Vec<(Device, String, String)>> {
+    let raw_devices: Vec<(Device, String)> = host
+        .input_devices()?
+        .filter_map(|device| {
+            device
+                .description()
+                .ok()
+                .map(|description| (device, description.name().to_string()))
+        })
+        .collect();
+
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for (_, raw_name) in &raw_devices {
+        *counts.entry(raw_name.clone()).or_default() += 1;
+    }
+
+    let mut seen: HashMap<String, usize> = HashMap::new();
+    let mut result = Vec::with_capacity(raw_devices.len());
+    for (device, raw_name) in raw_devices {
+        let total = counts.get(&raw_name).copied().unwrap_or(1);
+        let display_name = if total > 1 {
+            let next = seen.entry(raw_name.clone()).or_default();
+            *next += 1;
+            format!("{} [#{}]", raw_name, *next)
+        } else {
+            raw_name.clone()
+        };
+        result.push((device, raw_name, display_name));
+    }
+
+    Ok(result)
+}
+
+fn select_input_device(
+    devices: &[(Device, String, String)],
+    selected_name: &str,
+) -> Option<(Device, String, String)> {
+    if let Some((base_name, duplicate_index)) = parse_indexed_name(selected_name) {
+        let mut matched_index = 0usize;
+        for (device, raw_name, display_name) in devices {
+            if raw_name == &base_name {
+                matched_index += 1;
+                if matched_index == duplicate_index {
+                    return Some((device.clone(), raw_name.clone(), display_name.clone()));
+                }
+            }
+        }
+        return None;
+    }
+
+    devices
+        .iter()
+        .find(|(_, raw_name, display_name)| {
+            raw_name == selected_name || display_name == selected_name
+        })
+        .map(|(device, raw_name, display_name)| {
+            (device.clone(), raw_name.clone(), display_name.clone())
+        })
+}
+
+fn parse_indexed_name(name: &str) -> Option<(String, usize)> {
+    if !name.ends_with(']') {
+        return None;
+    }
+    let marker_start = name.rfind(" [#")?;
+    let index_part = &name[(marker_start + 3)..(name.len() - 1)];
+    let parsed_index = index_part.parse::<usize>().ok()?;
+    if parsed_index == 0 {
+        return None;
+    }
+    let base_name = name[..marker_start].to_string();
+    if base_name.is_empty() {
+        return None;
+    }
+    Some((base_name, parsed_index))
 }

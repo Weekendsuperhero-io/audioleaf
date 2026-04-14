@@ -9,7 +9,6 @@ use axum::{
 };
 use base64::Engine;
 use clap::Parser;
-use cpal::traits::{DeviceTrait, HostTrait};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -879,20 +878,8 @@ async fn get_audio_backends(State(state): State<ApiState>) -> ApiResult<AudioBac
         .visualizer_config
         .audio_backend;
 
-    let host = cpal::default_host();
-    let mut available_audio_backends: Vec<String> = match host.input_devices() {
-        Ok(devices) => devices
-            .filter_map(|device| {
-                device
-                    .description()
-                    .ok()
-                    .map(|description| description.name().to_string())
-            })
-            .collect(),
-        Err(_) => Vec::new(),
-    };
-    available_audio_backends.sort();
-    available_audio_backends.dedup();
+    let mut available_audio_backends =
+        audioleaf::audio::list_input_backend_names().unwrap_or_else(|_| Vec::new());
 
     if !available_audio_backends
         .iter()
