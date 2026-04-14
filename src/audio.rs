@@ -9,6 +9,14 @@ pub struct AudioStream {
     pub stream_config: StreamConfig,
 }
 
+#[derive(Clone)]
+struct InputDeviceEntry {
+    device: Device,
+    backend_name: String,
+    friendly_name: String,
+    legacy_display_name: String,
+}
+
 impl AudioStream {
     /// Creates a new `AudioStream` instance for capturing audio from an input device.
     ///
@@ -29,7 +37,7 @@ impl AudioStream {
     ///
     /// Propagates `cpal` errors for device discovery or config retrieval. Bail with available devices list if none match.
     pub fn new(device_name: Option<&str>) -> Result<Self> {
-        let device_name = match device_name {
+        let requested_name = match device_name {
             Some(name) => name,
             None => constants::DEFAULT_AUDIO_BACKEND,
         };
@@ -37,7 +45,7 @@ impl AudioStream {
         let input_devices = enumerate_input_devices(&host)?;
 
         // Try to find the device in input devices (for loopback/monitor devices)
-        let device = match device_name {
+        let device = match requested_name {
             constants::DEFAULT_AUDIO_BACKEND => {
                 // Check for common loopback device names first
                 let loopback_names = [
@@ -52,11 +60,16 @@ impl AudioStream {
                 ];
 
                 let mut loopback_device = None;
-                for (device, raw_name, _) in &input_devices {
-                    if loopback_names.iter().any(|lb| raw_name.contains(lb)) {
+                for entry in &input_devices {
+                    if loopback_names.iter().any(|lb| {
+                        entry.friendly_name.contains(lb) || entry.backend_name.contains(lb)
+                    }) {
                         #[cfg(debug_assertions)]
-                        eprintln!("INFO: Found loopback device: {}", raw_name);
-                        loopback_device = Some(device.clone());
+                        eprintln!(
+                            "INFO: Found loopback device: {} ({})",
+                            entry.friendly_name, entry.backend_name
+                        );
+                        loopback_device = Some(entry.device.clone());
                         break;
                     }
                 }
@@ -68,13 +81,13 @@ impl AudioStream {
                     host.default_input_device()
                 })
             }
-            _ => select_input_device(&input_devices, device_name).map(|(device, _, _)| device),
+            _ => select_input_device(&input_devices, requested_name).map(|entry| entry.device),
         };
 
         let Some(device) = device else {
             bail!(format!(
                 "Audio backend `{}` not found, available options: {}",
-                device_name,
+                requested_name,
                 list_input_backend_names()?.join(", ")
             ));
         };
@@ -98,67 +111,109 @@ impl AudioStream {
 pub fn list_input_backend_names() -> Result<Vec<String>> {
     let host = cpal::default_host();
     let devices = enumerate_input_devices(&host)?;
-    Ok(devices.into_iter().map(|(_, _, display)| display).collect())
+    Ok(devices
+        .into_iter()
+        .map(|entry| entry.backend_name)
+        .collect())
 }
 
-fn enumerate_input_devices(host: &cpal::Host) -> Result<Vec<(Device, String, String)>> {
-    let raw_devices: Vec<(Device, String)> = host
+fn enumerate_input_devices(host: &cpal::Host) -> Result<Vec<InputDeviceEntry>> {
+    let raw_devices: Vec<(Device, String, String)> = host
         .input_devices()?
         .filter_map(|device| {
-            device
+            let backend_name = device
+                .id()
+                .ok()
+                .map(|id| id.1.trim().to_string())
+                .filter(|name| !name.is_empty());
+            let friendly_name = device
                 .description()
                 .ok()
-                .map(|description| (device, description.name().to_string()))
+                .map(|description| description.name().trim().to_string())
+                .filter(|name| !name.is_empty());
+
+            let backend_name = match (backend_name, friendly_name.as_deref()) {
+                (Some(name), _) => name,
+                (None, Some(name)) => name.to_string(),
+                (None, None) => return None,
+            };
+            let friendly_name = friendly_name.unwrap_or_else(|| backend_name.clone());
+            Some((device, backend_name, friendly_name))
         })
         .collect();
 
     let mut counts: HashMap<String, usize> = HashMap::new();
-    for (_, raw_name) in &raw_devices {
-        *counts.entry(raw_name.clone()).or_default() += 1;
+    for (_, _, friendly_name) in &raw_devices {
+        *counts.entry(friendly_name.clone()).or_default() += 1;
     }
 
     let mut seen: HashMap<String, usize> = HashMap::new();
     let mut result = Vec::with_capacity(raw_devices.len());
-    for (device, raw_name) in raw_devices {
-        let total = counts.get(&raw_name).copied().unwrap_or(1);
-        let display_name = if total > 1 {
-            let next = seen.entry(raw_name.clone()).or_default();
+    for (device, backend_name, friendly_name) in raw_devices {
+        let total = counts.get(&friendly_name).copied().unwrap_or(1);
+        let legacy_display_name = if total > 1 {
+            let next = seen.entry(friendly_name.clone()).or_default();
             *next += 1;
-            format!("{} [#{}]", raw_name, *next)
+            format!("{} [#{}]", friendly_name, *next)
         } else {
-            raw_name.clone()
+            friendly_name.clone()
         };
-        result.push((device, raw_name, display_name));
+        result.push(InputDeviceEntry {
+            device,
+            backend_name,
+            friendly_name,
+            legacy_display_name,
+        });
     }
 
     Ok(result)
 }
 
 fn select_input_device(
-    devices: &[(Device, String, String)],
+    devices: &[InputDeviceEntry],
     selected_name: &str,
-) -> Option<(Device, String, String)> {
-    if let Some((base_name, duplicate_index)) = parse_indexed_name(selected_name) {
-        let mut matched_index = 0usize;
-        for (device, raw_name, display_name) in devices {
-            if raw_name == &base_name {
-                matched_index += 1;
-                if matched_index == duplicate_index {
-                    return Some((device.clone(), raw_name.clone(), display_name.clone()));
-                }
-            }
-        }
+) -> Option<InputDeviceEntry> {
+    let selected_name = selected_name.trim();
+    if selected_name.is_empty() {
         return None;
     }
 
+    if let Some(entry) = devices.iter().find(|entry| {
+        entry.backend_name == selected_name
+            || entry.friendly_name == selected_name
+            || entry.legacy_display_name == selected_name
+    }) {
+        return Some(entry.clone());
+    }
+
+    let selected_without_host_prefix = strip_host_prefix(selected_name);
+    if selected_without_host_prefix != selected_name
+        && let Some(entry) = devices.iter().find(|entry| {
+            entry.backend_name == selected_without_host_prefix
+                || entry.friendly_name == selected_without_host_prefix
+                || entry.legacy_display_name == selected_without_host_prefix
+        })
+    {
+        return Some(entry.clone());
+    }
+
+    if let Some((base_name, duplicate_index)) = parse_indexed_name(selected_name) {
+        let mut matched_index = 0usize;
+        for entry in devices {
+            if entry.friendly_name == base_name {
+                matched_index += 1;
+                if matched_index == duplicate_index {
+                    return Some(entry.clone());
+                }
+            }
+        }
+    }
+
+    let candidate_names = expand_selector_candidates(selected_name);
     devices
         .iter()
-        .find(|(_, raw_name, display_name)| {
-            raw_name == selected_name || display_name == selected_name
-        })
-        .map(|(device, raw_name, display_name)| {
-            (device.clone(), raw_name.clone(), display_name.clone())
-        })
+        .find(|entry| candidate_names.contains(&entry.backend_name))
+        .cloned()
 }
 
 fn parse_indexed_name(name: &str) -> Option<(String, usize)> {
@@ -176,4 +231,190 @@ fn parse_indexed_name(name: &str) -> Option<(String, usize)> {
         return None;
     }
     Some((base_name, parsed_index))
+}
+
+fn strip_host_prefix(name: &str) -> &str {
+    let Some((prefix, remainder)) = name.split_once(':') else {
+        return name;
+    };
+    if prefix.eq_ignore_ascii_case("alsa")
+        || prefix.eq_ignore_ascii_case("coreaudio")
+        || prefix.eq_ignore_ascii_case("wasapi")
+        || prefix.eq_ignore_ascii_case("asio")
+        || prefix.eq_ignore_ascii_case("jack")
+        || prefix.eq_ignore_ascii_case("pipewire")
+        || prefix.eq_ignore_ascii_case("aaudio")
+        || prefix.eq_ignore_ascii_case("webaudio")
+        || prefix.eq_ignore_ascii_case("emscripten")
+        || prefix.eq_ignore_ascii_case("null")
+    {
+        return remainder.trim();
+    }
+    name
+}
+
+fn expand_selector_candidates(selected_name: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    push_candidate(&mut candidates, selected_name);
+
+    let Some((prefix_raw, remainder_raw)) = selected_name.split_once(':') else {
+        return candidates;
+    };
+    let prefix = prefix_raw.trim().to_ascii_lowercase();
+    if prefix != "hw" && prefix != "plughw" {
+        return candidates;
+    }
+    let remainder = remainder_raw.trim();
+    if remainder.is_empty() {
+        return candidates;
+    }
+
+    let Some((card, dev, subdev)) = parse_alsa_selector_parts(remainder) else {
+        return candidates;
+    };
+    let normalized_prefix = prefix.as_str();
+    push_candidate(
+        &mut candidates,
+        &format!("{}:{},{}", normalized_prefix, card, dev),
+    );
+    push_candidate(
+        &mut candidates,
+        &format!("{}:CARD={},DEV={}", normalized_prefix, card, dev),
+    );
+
+    if let Some(subdev) = subdev.as_deref() {
+        push_candidate(
+            &mut candidates,
+            &format!("{}:{},{},{}", normalized_prefix, card, dev, subdev),
+        );
+        if subdev == "0" {
+            push_candidate(
+                &mut candidates,
+                &format!("{}:{},{}", normalized_prefix, card, dev),
+            );
+        } else {
+            push_candidate(
+                &mut candidates,
+                &format!(
+                    "{}:CARD={},DEV={},SUBDEV={}",
+                    normalized_prefix, card, dev, subdev
+                ),
+            );
+        }
+    } else {
+        push_candidate(
+            &mut candidates,
+            &format!("{}:{},{},0", normalized_prefix, card, dev),
+        );
+    }
+
+    if !is_ascii_digits(&card)
+        && let Some(card_index) = lookup_alsa_card_index(&card)
+    {
+        push_candidate(
+            &mut candidates,
+            &format!("{}:{},{}", normalized_prefix, card_index, dev),
+        );
+        push_candidate(
+            &mut candidates,
+            &format!("{}:CARD={},DEV={}", normalized_prefix, card_index, dev),
+        );
+    }
+
+    candidates
+}
+
+fn push_candidate(candidates: &mut Vec<String>, candidate: &str) {
+    let trimmed = candidate.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if candidates.iter().any(|existing| existing == trimmed) {
+        return;
+    }
+    candidates.push(trimmed.to_string());
+}
+
+fn parse_alsa_selector_parts(remainder: &str) -> Option<(String, String, Option<String>)> {
+    if remainder.contains("CARD=") || remainder.contains("DEV=") {
+        parse_named_alsa_selector_parts(remainder)
+    } else {
+        parse_short_alsa_selector_parts(remainder)
+    }
+}
+
+fn parse_short_alsa_selector_parts(remainder: &str) -> Option<(String, String, Option<String>)> {
+    let mut parts = remainder.split(',').map(str::trim);
+    let card = parts.next()?.to_string();
+    let dev = parts.next()?.to_string();
+    if card.is_empty() || dev.is_empty() {
+        return None;
+    }
+    let subdev = parts
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    Some((card, dev, subdev))
+}
+
+fn parse_named_alsa_selector_parts(remainder: &str) -> Option<(String, String, Option<String>)> {
+    let mut card: Option<String> = None;
+    let mut dev: Option<String> = None;
+    let mut subdev: Option<String> = None;
+
+    for token in remainder.split(',') {
+        let token = token.trim();
+        let Some((key, value)) = token.split_once('=') else {
+            continue;
+        };
+        let key = key.trim().to_ascii_uppercase();
+        let value = value.trim().to_string();
+        if value.is_empty() {
+            continue;
+        }
+        match key.as_str() {
+            "CARD" => card = Some(value),
+            "DEV" => dev = Some(value),
+            "SUBDEV" => subdev = Some(value),
+            _ => {}
+        }
+    }
+
+    Some((card?, dev?, subdev))
+}
+
+fn is_ascii_digits(value: &str) -> bool {
+    !value.is_empty() && value.chars().all(|c| c.is_ascii_digit())
+}
+
+#[cfg(target_os = "linux")]
+fn lookup_alsa_card_index(card_name: &str) -> Option<usize> {
+    let cards = std::fs::read_to_string("/proc/asound/cards").ok()?;
+    for line in cards.lines() {
+        let line = line.trim_start();
+        let Some(bracket_start) = line.find('[') else {
+            continue;
+        };
+        let Some(bracket_end_offset) = line[bracket_start + 1..].find(']') else {
+            continue;
+        };
+        let bracket_end = bracket_start + 1 + bracket_end_offset;
+        let short_name = line[bracket_start + 1..bracket_end].trim();
+        if !short_name.eq_ignore_ascii_case(card_name) {
+            continue;
+        }
+        let Some(index_str) = line.split_whitespace().next() else {
+            continue;
+        };
+        if let Ok(index) = index_str.parse::<usize>() {
+            return Some(index);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn lookup_alsa_card_index(_card_name: &str) -> Option<usize> {
+    None
 }

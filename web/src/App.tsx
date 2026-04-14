@@ -592,16 +592,17 @@ function App() {
   }
 
   function handleAudioBackendChange(nextBackend: string) {
+    const normalizedBackend = nextBackend.trim() || "default";
     setSettingsDraft((prev) => ({
       ...prev,
-      audio_backend: nextBackend,
+      audio_backend: normalizedBackend,
     }));
-    if ((visualizerConfig?.audio_backend ?? "default") === nextBackend) {
+    if ((visualizerConfig?.audio_backend ?? "default") === normalizedBackend) {
       return;
     }
     void applySettingsPatch(
-      { audio_backend: nextBackend },
-      `Audio backend set to ${nextBackend}.`,
+      { audio_backend: normalizedBackend },
+      `Audio backend set to ${normalizedBackend}.`,
     );
   }
 
@@ -1030,18 +1031,34 @@ function App() {
                   <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                     <label className="space-y-1 text-xs text-muted-foreground">
                       <span>Audio backend</span>
-                      <select
+                      <input
+                        list="audio-backend-options"
                         className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground"
                         value={settingsDraft.audio_backend}
-                        onChange={(event) => handleAudioBackendChange(event.currentTarget.value)}
+                        onChange={(event) => {
+                          const value = event.currentTarget.value;
+                          setSettingsDraft((prev) => ({
+                            ...prev,
+                            audio_backend: value,
+                          }));
+                        }}
+                        onBlur={(event) => handleAudioBackendChange(event.currentTarget.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.preventDefault();
+                            event.currentTarget.blur();
+                          }
+                        }}
+                        placeholder="default or hw:Loopback,1,0"
                         disabled={savingConfigSection !== null}
-                      >
+                      />
+                      <datalist id="audio-backend-options">
                         {availableBackendOptions.map((backend) => (
                           <option key={backend} value={backend}>
                             {backend}
                           </option>
                         ))}
-                      </select>
+                      </datalist>
                     </label>
 
                     <label className="space-y-1 text-xs text-muted-foreground">
