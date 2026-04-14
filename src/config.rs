@@ -86,7 +86,7 @@ pub enum Effect {
     Pulse,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct VisualizerConfig {
     pub audio_backend: Option<String>,
     pub freq_range: Option<(u16, u16)>,
@@ -135,7 +135,7 @@ impl VisualizerConfig {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Config {
     pub default_nl_device_name: Option<String>,
     pub visualizer_config: VisualizerConfig,

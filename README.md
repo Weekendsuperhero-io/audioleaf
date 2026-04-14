@@ -70,6 +70,69 @@ To connect to a specific device:
 audioleaf -d "Shapes AC01"
 ```
 
+### Web Control Panel (Axum + React)
+
+Audioleaf now includes an HTTP API and a Vite/React control panel scaffold.
+
+Start the API server:
+
+```bash
+cargo run --bin audioleaf-api
+```
+
+The API process also starts a live visualizer engine (using your saved config), so web effect/palette/settings changes apply to panels immediately. Web updates modify the running state and are not auto-written to `config.toml`.
+
+In a second terminal, start the web app:
+
+```bash
+cd web
+pnpm install
+pnpm dev
+```
+
+The Vite dev server runs at `http://127.0.0.1:5173` and proxies `/api/*` to `http://127.0.0.1:8787`.
+
+Current API routes:
+
+- `GET /api/health`
+- `GET /api/config`
+- `POST /api/config/save` (persist current runtime config to `config.toml`)
+- `PUT /api/config/visualizer/effect` (`effect`: Spectrum | EnergyWave | Pulse)
+- `PUT /api/config/visualizer/palette` (`palette_name`: preset name)
+- `PUT /api/config/visualizer/sort` (`primary_axis`, `sort_primary`, `sort_secondary`)
+- `PUT /api/config/visualizer/settings` (`audio_backend`, `freq_range`, `default_gain`, `transition_time`, `time_window`)
+- `GET /api/now-playing` (latest Shairport track metadata + extracted artwork colors)
+- `PUT /api/now-playing/settings` (`drive_visualizer_palette`)
+- `GET /api/now-playing/artwork` (latest album artwork image bytes)
+- `GET /api/visualizer/preview` (live panel colors from running visualizer)
+- `GET /api/audio/backends`
+- `GET /api/devices`
+- `GET /api/devices/{name}/info`
+- `GET /api/devices/{name}/layout`
+- `PUT /api/devices/{name}/state` (`power_on` and/or `brightness` 0-100)
+- `GET /api/palettes`
+
+#### Shairport Sync Metadata Setup
+
+To power the web "Now Playing" panel from AirPlay metadata, enable metadata in `shairport-sync.conf`:
+
+```conf
+metadata =
+{
+  enabled = "yes";
+  include_cover_art = "yes";
+  pipe_name = "/tmp/shairport-sync-metadata";
+};
+```
+
+If you use a different metadata pipe path, set:
+
+```bash
+export AUDIOLEAF_SHAIRPORT_METADATA_PIPE=/absolute/path/to/your/pipe
+```
+
+before starting `audioleaf-api`.
+
 ### Controls
 
 Press <kbd>?</kbd> in the app to see all keybinds.

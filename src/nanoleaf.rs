@@ -278,6 +278,15 @@ impl NlDevice {
         }
     }
 
+    #[allow(dead_code)]
+    pub fn all_from_file(path: &Path) -> Result<Vec<Self>> {
+        let mut devices_file = File::open(path)?;
+        let mut contents = String::new();
+        devices_file.read_to_string(&mut contents)?;
+        let devices: NlDevices = toml::from_str(&contents)?;
+        Ok(devices.nl_devices)
+    }
+
     pub fn append_to_file(&self, path: &Path) -> Result<()> {
         // Create parent directory if it doesn't exist
         if let Some(parent) = path.parent() {

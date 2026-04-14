@@ -13,8 +13,10 @@ repository = "https://github.com/weekendsuperhero-io/audioleaf"
 
 [dependencies]
 anyhow = "1.0.102"
+base64 = "0.22.1"
 clap = { version = "4.6.0", features = ["derive"] }
 auto-palette = "0.9"
+axum = "0.8.4"
 cpal = "0.17.3"
 dasp_sample = "0.11.0"
 dirs = "6.0.0"
@@ -26,7 +28,9 @@ pollster = "0.4"
 reqwest = { version = "0.13", features = ["blocking", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+tokio = { version = "1.48.0", features = ["macros", "rt-multi-thread", "net"] }
 toml = "1"
+tower-http = { version = "0.6.6", features = ["cors"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"

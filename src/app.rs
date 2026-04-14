@@ -15,7 +15,7 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Display state shared between the main thread and the album art watcher thread.
 struct VizState {
@@ -54,6 +54,11 @@ pub struct App {
     // UI state
     show_visualization: bool,
     show_help: bool,
+
+    // Color interpolation for smooth panel preview
+    prev_colors: HashMap<u16, [u8; 3]>,
+    target_colors: HashMap<u16, [u8; 3]>,
+    color_transition_start: Instant,
 
     // Album art
     viz_state: Arc<Mutex<VizState>>,
@@ -151,6 +156,9 @@ impl App {
             sort_secondary,
             show_visualization: false,
             show_help: false,
+            prev_colors: HashMap::new(),
+            target_colors: HashMap::new(),
+            color_transition_start: Instant::now(),
             viz_state,
             album_art_stop: None,
             album_art_texture: None,
@@ -217,10 +225,22 @@ impl App {
                 '?' => self.show_help = !self.show_help,
                 _ if self.show_help => {} // Swallow other keys while help is shown
                 '-' | '_' => {
+                    self.transition_time = self.transition_time.saturating_sub(1);
+                    let _ = self
+                        .visualizer_tx
+                        .send(VisualizerMsg::SetTransitionTime(self.transition_time));
+                }
+                '=' | '+' => {
+                    self.transition_time = (self.transition_time + 1).min(10);
+                    let _ = self
+                        .visualizer_tx
+                        .send(VisualizerMsg::SetTransitionTime(self.transition_time));
+                }
+                'g' => {
                     self.gain -= 0.05;
                     let _ = self.visualizer_tx.send(VisualizerMsg::SetGain(self.gain));
                 }
-                '=' | '+' => {
+                'G' => {
                     self.gain += 0.05;
                     let _ = self.visualizer_tx.send(VisualizerMsg::SetGain(self.gain));
                 }
@@ -249,18 +269,6 @@ impl App {
                         .visualizer_tx
                         .send(VisualizerMsg::SetTimeWindow(self.time_window));
                 }
-                ',' => {
-                    self.transition_time = self.transition_time.saturating_sub(1);
-                    let _ = self
-                        .visualizer_tx
-                        .send(VisualizerMsg::SetTransitionTime(self.transition_time));
-                }
-                '.' => {
-                    self.transition_time = (self.transition_time + 1).min(10);
-                    let _ = self
-                        .visualizer_tx
-                        .send(VisualizerMsg::SetTransitionTime(self.transition_time));
-                }
                 'f' | 'F' => {
                     self.freq_preset_index =
                         (self.freq_preset_index + 1) % constants::FREQ_RANGE_PRESETS.len();
@@ -277,9 +285,38 @@ impl App {
         false
     }
 
+    // ── Color interpolation ─────────────────────────────────────────────
+
+    fn interpolated_colors(&self) -> HashMap<u16, [u8; 3]> {
+        // transition_time is in units of 100ms
+        let duration = Duration::from_millis(self.transition_time as u64 * 100);
+        let elapsed = self.color_transition_start.elapsed();
+        let t = if duration.is_zero() {
+            1.0_f32
+        } else {
+            (elapsed.as_secs_f32() / duration.as_secs_f32()).min(1.0)
+        };
+
+        let mut result = self.target_colors.clone();
+        if t < 1.0 {
+            for (id, target) in &self.target_colors {
+                let prev = self.prev_colors.get(id).copied().unwrap_or([0, 0, 0]);
+                result.insert(
+                    *id,
+                    [
+                        lerp_u8(prev[0], target[0], t),
+                        lerp_u8(prev[1], target[1], t),
+                        lerp_u8(prev[2], target[2], t),
+                    ],
+                );
+            }
+        }
+        result
+    }
+
     // ── Panel rendering ──────────────────────────────────────────────────
 
-    fn draw_panels(&self) {
+    fn draw_panels(&mut self) {
         let sw = screen_width();
         let sh = screen_height();
 
@@ -318,9 +355,16 @@ impl App {
         let offset_x = (sw - layout_width * scale) / 2.0;
         let offset_y = padding_top + (available_height - layout_height * scale) / 2.0;
 
-        // Snapshot visualization colors once per frame
+        // Snapshot visualization colors with smooth interpolation
         let vis_colors = if self.show_visualization {
-            self.shared_colors.lock().ok().map(|map| map.clone())
+            if let Ok(map) = self.shared_colors.lock() {
+                if *map != self.target_colors {
+                    self.prev_colors = self.interpolated_colors();
+                    self.target_colors = map.clone();
+                    self.color_transition_start = Instant::now();
+                }
+            }
+            Some(self.interpolated_colors())
         } else {
             None
         };
@@ -656,7 +700,7 @@ impl App {
         );
 
         // ── Bottom-center: controls hint ──
-        let hint = "? help | ESC quit | Space preview | -/+ gain | [/] window | ,/. transition | F freq | 1-0 palette | E effect | N album art";
+        let hint = "? help | ESC quit | Space preview | -/+ speed | g/G gain | [/] window | F freq | 1-0 palette | E effect | N album art";
         let hm = sharp_measure(14.0, hint);
         let hx = (sw - hm.width) / 2.0;
         sharp_text(
@@ -684,9 +728,9 @@ impl App {
             ("ESC / Q", "Quit"),
             ("?", "Toggle this help"),
             ("Space", "Toggle panel visualization preview"),
-            ("-  /  +", "Decrease / increase gain"),
+            ("-  /  +", "Decrease / increase transition speed"),
+            ("g  /  G", "Decrease / increase gain"),
             ("[  /  ]", "Decrease / increase sample time window"),
-            (",  /  .", "Decrease / increase transition time"),
             ("F", "Cycle frequency range preset"),
             ("1-9, 0", "Switch color palette"),
             ("E", "Cycle effect: Spectrum / Energy Wave / Pulse"),
@@ -938,6 +982,10 @@ fn draw_controller(
 }
 
 // ── Sharp text helpers (DPI-aware via camera_font_scale) ─────────────────
+
+fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t).round() as u8
+}
 
 fn sharp_text(text: &str, x: f32, y: f32, logical_size: f32, color: Color) {
     let (fs, sx, sy) = camera_font_scale(logical_size);

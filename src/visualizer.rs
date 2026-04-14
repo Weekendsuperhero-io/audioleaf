@@ -25,7 +25,7 @@ enum VisualizerState {
     Done,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum VisualizerMsg {
     End,
     SetGain(f32),

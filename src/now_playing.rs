@@ -59,7 +59,7 @@ pub fn fetch_artwork_and_palette() -> Option<(Vec<u8>, Vec<[u8; 3]>)> {
 mod macos {
     use objc2::msg_send;
     use objc2::rc::{Retained, autoreleasepool};
-    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2::runtime::{AnyClass, AnyObject, Sel};
     use objc2_foundation::NSString;
 
     #[link(name = "ScriptingBridge", kind = "framework")]
@@ -93,6 +93,64 @@ mod macos {
                 return None;
             }
             Some(app)
+        }
+    }
+
+    /// Check if an ObjC object responds to `length` and `bytes` (i.e. is NSData).
+    fn is_nsdata(obj: *mut AnyObject) -> bool {
+        unsafe {
+            let sel_length = Sel::register(c"length");
+            let sel_bytes = Sel::register(c"bytes");
+            let has_length: bool = msg_send![obj, respondsToSelector: sel_length];
+            let has_bytes: bool = msg_send![obj, respondsToSelector: sel_bytes];
+            has_length && has_bytes
+        }
+    }
+
+    /// Check if an ObjC object responds to a given selector.
+    fn responds_to(obj: *mut AnyObject, sel: &str) -> bool {
+        unsafe {
+            let cstr = std::ffi::CString::new(sel).unwrap();
+            let sel = Sel::register(&cstr);
+            msg_send![obj, respondsToSelector: sel]
+        }
+    }
+
+    /// If `obj` is an NSImage, extract bytes via TIFFRepresentation; otherwise return None.
+    fn nsimage_to_bytes(obj: *mut AnyObject) -> Option<Vec<u8>> {
+        unsafe {
+            if !responds_to(obj, "TIFFRepresentation") {
+                return None;
+            }
+            let tiff: *mut AnyObject = msg_send![obj, TIFFRepresentation];
+            if tiff.is_null() {
+                return None;
+            }
+            if !is_nsdata(tiff) {
+                return None;
+            }
+            let len: usize = msg_send![tiff, length];
+            if len == 0 {
+                return None;
+            }
+            let ptr: *const u8 = msg_send![tiff, bytes];
+            if ptr.is_null() {
+                return None;
+            }
+            Some(std::slice::from_raw_parts(ptr, len).to_vec())
+        }
+    }
+
+    /// Resolve an SBObject proxy by calling `get`, or return the object as-is
+    /// if it doesn't respond to `get` (i.e. it's already materialized).
+    fn resolve_proxy(obj: *mut AnyObject) -> *mut AnyObject {
+        if obj.is_null() {
+            return obj;
+        }
+        if responds_to(obj, "get") {
+            unsafe { msg_send![obj, get] }
+        } else {
+            obj
         }
     }
 
@@ -189,27 +247,42 @@ mod macos {
                     artwork.is_null()
                 );
                 if !artwork.is_null() {
-                    // Properties on SBObject return lazy proxies — call `get`
-                    // to force the Apple Event and materialize the real object.
+                    // Properties on SBObject may return lazy proxies or
+                    // already-materialized objects (e.g. NSImage). Use
+                    // resolve_proxy to call `get` only when supported.
 
                     // Try rawData first
                     let raw_proxy: *mut AnyObject = msg_send![artwork, rawData];
                     if !raw_proxy.is_null() {
-                        let raw: *mut AnyObject = msg_send![raw_proxy, get];
-                        debug_log!("DEBUG now_playing: rawData.get null = {}", raw.is_null());
+                        let raw = resolve_proxy(raw_proxy);
+                        debug_log!(
+                            "DEBUG now_playing: rawData resolved null = {}",
+                            raw.is_null()
+                        );
                         if !raw.is_null() {
-                            let len: usize = msg_send![raw, length];
-                            debug_log!("DEBUG now_playing: rawData length = {}", len);
-                            if len > 0 {
-                                let ptr: *const u8 = msg_send![raw, bytes];
-                                if !ptr.is_null() {
-                                    let bytes = std::slice::from_raw_parts(ptr, len).to_vec();
-                                    eprintln!(
-                                        "DEBUG now_playing: rawData artwork {} bytes",
-                                        bytes.len()
-                                    );
-                                    return Some(bytes);
+                            // It might be NSData directly
+                            if is_nsdata(raw) {
+                                let len: usize = msg_send![raw, length];
+                                debug_log!("DEBUG now_playing: rawData length = {}", len);
+                                if len > 0 {
+                                    let ptr: *const u8 = msg_send![raw, bytes];
+                                    if !ptr.is_null() {
+                                        let bytes = std::slice::from_raw_parts(ptr, len).to_vec();
+                                        eprintln!(
+                                            "DEBUG now_playing: rawData artwork {} bytes",
+                                            bytes.len()
+                                        );
+                                        return Some(bytes);
+                                    }
                                 }
+                            }
+                            // It might be an NSImage
+                            if let Some(bytes) = nsimage_to_bytes(raw) {
+                                eprintln!(
+                                    "DEBUG now_playing: rawData NSImage artwork {} bytes",
+                                    bytes.len()
+                                );
+                                return Some(bytes);
                             }
                         }
                     }
@@ -217,21 +290,30 @@ mod macos {
                     // Try data property (MusicPicture)
                     let data_proxy: *mut AnyObject = msg_send![artwork, data];
                     if !data_proxy.is_null() {
-                        let data: *mut AnyObject = msg_send![data_proxy, get];
-                        debug_log!("DEBUG now_playing: data.get null = {}", data.is_null());
+                        let data = resolve_proxy(data_proxy);
+                        debug_log!("DEBUG now_playing: data resolved null = {}", data.is_null());
                         if !data.is_null() {
-                            let len: usize = msg_send![data, length];
-                            debug_log!("DEBUG now_playing: data length = {}", len);
-                            if len > 0 {
-                                let ptr: *const u8 = msg_send![data, bytes];
-                                if !ptr.is_null() {
-                                    let bytes = std::slice::from_raw_parts(ptr, len).to_vec();
-                                    eprintln!(
-                                        "DEBUG now_playing: data artwork {} bytes",
-                                        bytes.len()
-                                    );
-                                    return Some(bytes);
+                            if is_nsdata(data) {
+                                let len: usize = msg_send![data, length];
+                                debug_log!("DEBUG now_playing: data length = {}", len);
+                                if len > 0 {
+                                    let ptr: *const u8 = msg_send![data, bytes];
+                                    if !ptr.is_null() {
+                                        let bytes = std::slice::from_raw_parts(ptr, len).to_vec();
+                                        eprintln!(
+                                            "DEBUG now_playing: data artwork {} bytes",
+                                            bytes.len()
+                                        );
+                                        return Some(bytes);
+                                    }
                                 }
+                            }
+                            if let Some(bytes) = nsimage_to_bytes(data) {
+                                eprintln!(
+                                    "DEBUG now_playing: data NSImage artwork {} bytes",
+                                    bytes.len()
+                                );
+                                return Some(bytes);
                             }
                         }
                     }
