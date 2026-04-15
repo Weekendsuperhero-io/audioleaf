@@ -447,8 +447,12 @@ function App() {
 
     const configuredBackend = visualizer?.audio_backend ?? "default";
     const resolvedBackend = configuredBackend.trim().length > 0 ? configuredBackend : "default";
+    const hasDefaultBackend = nextAudioBackends.includes("default");
+    const backendIsAvailable = nextAudioBackends.includes(resolvedBackend);
+    const draftBackend =
+      backendIsAvailable || !hasDefaultBackend ? resolvedBackend : "default";
     setSettingsDraft({
-      audio_backend: resolvedBackend,
+      audio_backend: draftBackend,
       freq_min: String(visualizer?.freq_range?.[0] ?? 20),
       freq_max: String(visualizer?.freq_range?.[1] ?? 4500),
       default_gain: String(visualizer?.default_gain ?? 1),
@@ -458,11 +462,12 @@ function App() {
 
     if (
       resolvedBackend !== "default" &&
-      !nextAudioBackends.includes(resolvedBackend) &&
-      nextAudioBackends.includes("default")
+      !backendIsAvailable &&
+      hasDefaultBackend
     ) {
       setActionMessage((prev) =>
-        prev ?? `Configured audio backend "${resolvedBackend}" is not currently available.`,
+        prev ??
+        `Configured audio backend "${resolvedBackend}" is not currently available. Using "default".`,
       );
     }
   }

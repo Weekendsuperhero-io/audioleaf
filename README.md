@@ -174,7 +174,7 @@ default_nl_device_name = "Shapes AC01"
 
 [visualizer_config]
 # Audio input device (see Audio Setup below)
-audio_backend = "BlackHole 2ch"
+audio_backend = "default"
 
 # Frequency range to visualize [min_hz, max_hz]
 freq_range = [20, 4500]
@@ -236,6 +236,58 @@ effect = "Spectrum"        # "Spectrum", "EnergyWave", or "Pulse"
 2. Open `pavucontrol` (PulseAudio Volume Control)
 3. In the **Recording** tab, set audioleaf's input to your media player's monitor
 4. Set `audio_backend` in config.toml to match
+
+### Raspberry Pi (ALSA Loopback, Recommended)
+
+For AirPlay + live visualizer on Raspberry Pi, use ALSA loopback and keep audioleaf on
+`audio_backend = "default"` so ALSA routing is the single source of truth.
+
+1. Load/persist loopback:
+   ```bash
+   sudo modprobe snd-aloop
+   echo snd-aloop | sudo tee /etc/modules-load.d/snd-aloop.conf
+   echo "options snd-aloop id=Loopback index=2 pcm_substreams=8" \
+     | sudo tee /etc/modprobe.d/snd-aloop.conf
+   ```
+2. Set ALSA default capture mapping in both `/etc/asound.conf` and `~/.asoundrc`:
+   ```conf
+   pcm.audioleaf_in {
+     type plug
+     slave.pcm "hw:Loopback,1,0"
+   }
+
+   pcm.!default {
+     type plug
+     slave.pcm "hw:Loopback,1,0"
+   }
+   ```
+3. Configure `shairport-sync` to output to loopback playback:
+   ```conf
+   general = {
+     output_backend = "alsa";
+   };
+
+   alsa = {
+     output_device = "hw:Loopback,0,0";
+     output_rate = 44100;
+     output_format = "S16_LE";
+     output_channels = 2;
+     use_mmap_if_available = "no";
+   };
+
+   metadata = {
+     enabled = "yes";
+     include_cover_art = "yes";
+     pipe_name = "/tmp/shairport-sync-metadata";
+   };
+   ```
+4. Keep audioleaf backend on default and persist:
+   ```bash
+   curl -sS -X PUT http://127.0.0.1:8787/api/config/visualizer/settings \
+     -H 'content-type: application/json' \
+     -d '{"audio_backend":"default"}'
+   curl -sS -X POST http://127.0.0.1:8787/api/config/save
+   ```
 
 ## Dump Commands
 
