@@ -49,6 +49,7 @@ struct ApiState {
     devices_file_path: Option<PathBuf>,
     runtime_config: Arc<Mutex<audioleaf::config::Config>>,
     live_visualizer: Arc<Mutex<Option<LiveVisualizerRuntime>>>,
+    live_visualizer_recovery: Arc<Mutex<LiveVisualizerRecoveryState>>,
     now_playing: Arc<Mutex<NowPlayingRuntimeState>>,
 }
 
@@ -60,8 +61,17 @@ struct LiveVisualizerRuntime {
     shared_colors: Arc<Mutex<HashMap<u16, [u8; 3]>>>,
 }
 
+#[derive(Clone, Debug, Default)]
+struct LiveVisualizerRecoveryState {
+    consecutive_restart_failures: u32,
+    auto_fallback_to_default_active: bool,
+    last_restart_at_ms: Option<u64>,
+}
+
 const DEFAULT_SHAIRPORT_METADATA_PIPE: &str = "/tmp/shairport-sync-metadata";
 const NOW_PLAYING_RETRY_DELAY: Duration = Duration::from_secs(3);
+const LIVE_VISUALIZER_WATCHDOG_INTERVAL: Duration = Duration::from_secs(2);
+const LIVE_VISUALIZER_RESTART_FAILURE_LIMIT: u32 = 3;
 
 #[derive(Clone, Debug, Default)]
 struct NowPlayingTrackData {
@@ -390,6 +400,7 @@ async fn main() -> Result<()> {
         devices_file_path: options.devices_file_path,
         runtime_config: Arc::new(Mutex::new(initial_config)),
         live_visualizer: Arc::new(Mutex::new(None)),
+        live_visualizer_recovery: Arc::new(Mutex::new(LiveVisualizerRecoveryState::default())),
         now_playing: Arc::new(Mutex::new(NowPlayingRuntimeState::new(
             metadata_pipe_path.clone(),
         ))),
@@ -404,6 +415,7 @@ async fn main() -> Result<()> {
         println!("Live visualizer initialized.");
     }
     start_now_playing_reader(&state);
+    start_live_visualizer_watchdog(&state);
     println!(
         "Now-playing metadata reader initialized (pipe: {}).",
         metadata_pipe_path
@@ -985,6 +997,36 @@ fn start_now_playing_reader(state: &ApiState) {
     });
 }
 
+fn start_live_visualizer_watchdog(state: &ApiState) {
+    let state = state.clone();
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(LIVE_VISUALIZER_WATCHDOG_INTERVAL).await;
+            if let Err(err) = run_live_visualizer_watchdog_tick(&state).await {
+                eprintln!(
+                    "WARNING: live visualizer watchdog tick failed: {}",
+                    err.message
+                );
+            }
+        }
+    });
+}
+
+async fn run_live_visualizer_watchdog_tick(state: &ApiState) -> Result<(), ApiError> {
+    let should_recover = match current_live_visualizer(state)? {
+        Some(runtime) => runtime
+            .sender
+            .send(audioleaf::visualizer::VisualizerMsg::Ping)
+            .is_err(),
+        None => true,
+    };
+    if !should_recover {
+        return Ok(());
+    }
+
+    recover_live_visualizer(state, "watchdog health check").await
+}
+
 fn process_shairport_metadata_stream<R: BufRead>(
     state: &ApiState,
     reader: &mut R,
@@ -1308,9 +1350,72 @@ async fn ensure_live_visualizer(state: &ApiState) -> Result<LiveVisualizerRuntim
         return Ok(runtime);
     }
 
-    restart_live_visualizer(state).await?;
+    recover_live_visualizer(state, "ensure_live_visualizer").await?;
     current_live_visualizer(state)?
         .ok_or_else(|| ApiError::internal("Live visualizer failed to initialize"))
+}
+
+fn mark_live_visualizer_recovery_success(
+    state: &ApiState,
+    auto_fallback_to_default_active: bool,
+) -> Result<(), ApiError> {
+    let mut guard = state
+        .live_visualizer_recovery
+        .lock()
+        .map_err(|_| ApiError::internal("Live visualizer recovery state lock poisoned"))?;
+    guard.consecutive_restart_failures = 0;
+    guard.auto_fallback_to_default_active = auto_fallback_to_default_active;
+    guard.last_restart_at_ms = Some(now_unix_ms());
+    Ok(())
+}
+
+fn mark_live_visualizer_recovery_failure(state: &ApiState) -> Result<u32, ApiError> {
+    let mut guard = state
+        .live_visualizer_recovery
+        .lock()
+        .map_err(|_| ApiError::internal("Live visualizer recovery state lock poisoned"))?;
+    guard.consecutive_restart_failures = guard.consecutive_restart_failures.saturating_add(1);
+    Ok(guard.consecutive_restart_failures)
+}
+
+async fn recover_live_visualizer(state: &ApiState, reason: &str) -> Result<(), ApiError> {
+    let configured_backend = get_runtime_config_clone(state)?
+        .visualizer_config
+        .audio_backend
+        .unwrap_or_else(|| audioleaf::constants::DEFAULT_AUDIO_BACKEND.to_string());
+
+    match restart_live_visualizer(state).await {
+        Ok(()) => {
+            mark_live_visualizer_recovery_success(state, false)?;
+            return Ok(());
+        }
+        Err(primary_err) => {
+            let failure_count = mark_live_visualizer_recovery_failure(state)?;
+            eprintln!(
+                "WARNING: live visualizer restart failed (reason: {}, backend: {}, consecutive_failures: {}): {}",
+                reason, configured_backend, failure_count, primary_err.message
+            );
+
+            let should_try_default_fallback = configured_backend
+                != audioleaf::constants::DEFAULT_AUDIO_BACKEND
+                && failure_count >= LIVE_VISUALIZER_RESTART_FAILURE_LIMIT;
+            if !should_try_default_fallback {
+                return Err(primary_err);
+            }
+        }
+    }
+
+    eprintln!(
+        "WARNING: falling back live visualizer backend to '{}' after repeated restart failures.",
+        audioleaf::constants::DEFAULT_AUDIO_BACKEND
+    );
+    update_runtime_config(state, |config| {
+        config.visualizer_config.audio_backend =
+            Some(audioleaf::constants::DEFAULT_AUDIO_BACKEND.to_string());
+    })?;
+    restart_live_visualizer(state).await?;
+    mark_live_visualizer_recovery_success(state, true)?;
+    Ok(())
 }
 
 async fn send_live_message_with_recovery(
@@ -1322,7 +1427,7 @@ async fn send_live_message_with_recovery(
         return Ok(());
     }
 
-    restart_live_visualizer(state).await?;
+    recover_live_visualizer(state, "control message send failure").await?;
     let restarted = ensure_live_visualizer(state).await?;
     restarted
         .sender

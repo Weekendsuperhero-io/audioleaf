@@ -120,6 +120,8 @@ impl App {
             Arc::clone(&shared_colors),
         )?
         .init();
+        // Keep VisualizerMsg::Ping live across all binaries; no-op for the visualizer state machine.
+        let _ = tx.send(visualizer::VisualizerMsg::Ping);
 
         let mut palette_names = crate::palettes::get_palette_names();
         palette_names.sort();

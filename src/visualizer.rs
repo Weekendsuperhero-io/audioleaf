@@ -10,13 +10,18 @@ use cpal::{InputCallbackInfo, SampleFormat, SizedSample, traits::*};
 use dasp_sample::conv::ToSample;
 use palette::{FromColor, Oklch, Srgb};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     sync::{
         Arc, Mutex,
-        mpsc::{self, TryRecvError},
+        mpsc::{self, RecvTimeoutError, TryRecvError},
     },
     thread,
+    time::{Duration, Instant},
 };
+
+const STREAM_ERROR_WINDOW: Duration = Duration::from_secs(5);
+const STREAM_ERROR_THRESHOLD: usize = 8;
+const AUDIO_RECV_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Default)]
 enum VisualizerState {
@@ -28,6 +33,7 @@ enum VisualizerState {
 #[derive(Debug, Clone)]
 pub enum VisualizerMsg {
     End,
+    Ping,
     SetGain(f32),
     SetPalette(Vec<[u8; 3]>),
     SetEffect(Effect),
@@ -158,6 +164,7 @@ impl Visualizer {
     ) {
         match event {
             VisualizerMsg::End => self.state = VisualizerState::Done,
+            VisualizerMsg::Ping => {}
             VisualizerMsg::SetGain(gain) => self.gain = gain,
             VisualizerMsg::SetEffect(effect) => {
                 self.effect = effect;
@@ -249,6 +256,51 @@ impl Visualizer {
         move |data: &[T], _: &InputCallbackInfo| Self::send_samples(data, n_channels, &tx)
     }
 
+    fn should_restart_after_stream_error(
+        window: &Arc<Mutex<VecDeque<Instant>>>,
+        now: Instant,
+    ) -> bool {
+        let mut guard = match window.lock() {
+            Ok(guard) => guard,
+            Err(_) => return false,
+        };
+        guard.push_back(now);
+        while guard
+            .front()
+            .is_some_and(|timestamp| now.duration_since(*timestamp) > STREAM_ERROR_WINDOW)
+        {
+            let _ = guard.pop_front();
+        }
+        guard.len() >= STREAM_ERROR_THRESHOLD
+    }
+
+    fn process_pending_events(
+        &mut self,
+        rx_events: &mpsc::Receiver<VisualizerMsg>,
+        base_colors: &mut Vec<Oklch>,
+        brightness: &mut Vec<f32>,
+        prev_max: &mut [f32],
+        speed: &mut [f32],
+    ) -> bool {
+        loop {
+            match rx_events.try_recv() {
+                Ok(event) => self.update_state(event, base_colors, brightness, prev_max, speed),
+                Err(TryRecvError::Empty) => return true,
+                Err(TryRecvError::Disconnected) => {
+                    eprintln!("WARNING: visualizer events channel disconnected; stopping thread.");
+                    return false;
+                }
+            }
+        }
+    }
+
+    fn should_stop_from_stream_fault(rx_stream_fault: &mpsc::Receiver<()>) -> bool {
+        match rx_stream_fault.try_recv() {
+            Ok(_) | Err(TryRecvError::Disconnected) => true,
+            Err(TryRecvError::Empty) => false,
+        }
+    }
+
     /// Completes visualizer setup by starting audio capture stream and spawning processing thread.
     ///
     /// Builds and plays CPAL input stream matched to sample format, sending mono max samples via channel.
@@ -269,6 +321,10 @@ impl Visualizer {
         thread::spawn(move || {
             panic::register_backtrace_panic_handler();
             let (tx_audio, rx_audio) = mpsc::channel();
+            let (tx_stream_fault, rx_stream_fault) = mpsc::channel();
+            let stream_error_window: Arc<Mutex<VecDeque<Instant>>> = Arc::new(Mutex::new(
+                VecDeque::with_capacity(STREAM_ERROR_THRESHOLD + 1),
+            ));
             macro_rules! build_input_stream {
                 ($type:ty) => {
                     self.audio_stream.device.build_input_stream(
@@ -277,8 +333,18 @@ impl Visualizer {
                             self.audio_stream.stream_config.channels as usize,
                             tx_audio.clone(),
                         ),
-                        move |err| {
-                            eprintln!("WARNING: audio input stream callback error: {}", err);
+                        {
+                            let tx_stream_fault = tx_stream_fault.clone();
+                            let stream_error_window = Arc::clone(&stream_error_window);
+                            move |err| {
+                                eprintln!("WARNING: audio input stream callback error: {}", err);
+                                if Self::should_restart_after_stream_error(
+                                    &stream_error_window,
+                                    Instant::now(),
+                                ) {
+                                    let _ = tx_stream_fault.send(());
+                                }
+                            }
                         },
                         None,
                     )
@@ -330,29 +396,48 @@ impl Visualizer {
                 if matches!(self.state, VisualizerState::Done) {
                     break;
                 }
-                match rx_events.try_recv() {
-                    Ok(event) => self.update_state(
-                        event,
-                        &mut base_colors,
-                        &mut brightness,
-                        &mut prev_max,
-                        &mut speed,
-                    ),
-                    Err(err) => {
-                        if err == TryRecvError::Disconnected {
-                            eprintln!(
-                                "WARNING: visualizer events channel disconnected; stopping thread."
-                            );
-                            break;
-                        }
-                    }
+                if Self::should_stop_from_stream_fault(&rx_stream_fault) {
+                    eprintln!(
+                        "WARNING: audio stream entered repeated error state; stopping visualizer thread for recovery."
+                    );
+                    return;
+                }
+                if !self.process_pending_events(
+                    &rx_events,
+                    &mut base_colors,
+                    &mut brightness,
+                    &mut prev_max,
+                    &mut speed,
+                ) {
+                    break;
                 }
                 let to_collect = ((sample_rate as f32) * self.time_window).round() as usize;
                 let mut samples = Vec::with_capacity(2 * to_collect);
                 while samples.len() < to_collect {
-                    let mut new_samples = match rx_audio.recv() {
+                    let mut new_samples = match rx_audio.recv_timeout(AUDIO_RECV_TIMEOUT) {
                         Ok(samples) => samples,
-                        Err(_) => {
+                        Err(RecvTimeoutError::Timeout) => {
+                            if Self::should_stop_from_stream_fault(&rx_stream_fault) {
+                                eprintln!(
+                                    "WARNING: audio stream entered repeated error state; stopping visualizer thread for recovery."
+                                );
+                                return;
+                            }
+                            if !self.process_pending_events(
+                                &rx_events,
+                                &mut base_colors,
+                                &mut brightness,
+                                &mut prev_max,
+                                &mut speed,
+                            ) {
+                                return;
+                            }
+                            if matches!(self.state, VisualizerState::Done) {
+                                return;
+                            }
+                            continue;
+                        }
+                        Err(RecvTimeoutError::Disconnected) => {
                             eprintln!(
                                 "WARNING: audio sample channel disconnected; stopping thread."
                             );
