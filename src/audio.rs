@@ -91,9 +91,7 @@ impl AudioStream {
                 list_input_backend_names()?.join(", ")
             ));
         };
-        let audio_config = device.default_input_config()?;
-        let sample_format = audio_config.sample_format();
-        let stream_config: StreamConfig = audio_config.into();
+        let (sample_format, stream_config) = select_input_stream_profile(&device, requested_name)?;
 
         Ok(AudioStream {
             device,
@@ -214,6 +212,75 @@ fn select_input_device(
         .iter()
         .find(|entry| candidate_names.contains(&entry.backend_name))
         .cloned()
+}
+
+fn select_input_stream_profile(
+    device: &Device,
+    requested_name: &str,
+) -> Result<(SampleFormat, StreamConfig)> {
+    if should_prefer_loopback_profile(device, requested_name)
+        && let Some(profile) = pick_loopback_44100_profile(device)?
+    {
+        return Ok((profile.sample_format(), profile.config()));
+    }
+
+    let audio_config = device.default_input_config()?;
+    Ok((audio_config.sample_format(), audio_config.into()))
+}
+
+fn should_prefer_loopback_profile(device: &Device, requested_name: &str) -> bool {
+    let normalized = requested_name.to_ascii_lowercase();
+    if normalized == constants::DEFAULT_AUDIO_BACKEND {
+        return false;
+    }
+
+    if normalized.contains("loopback") || normalized.contains("aloop") {
+        return true;
+    }
+
+    if let Ok(description) = device.description()
+        && description.name().to_ascii_lowercase().contains("loopback")
+    {
+        return true;
+    }
+
+    if let Ok(device_id) = device.id()
+        && device_id.1.to_ascii_lowercase().contains("loopback")
+    {
+        return true;
+    }
+
+    false
+}
+
+fn pick_loopback_44100_profile(device: &Device) -> Result<Option<cpal::SupportedStreamConfig>> {
+    let mut best: Option<(u8, cpal::SupportedStreamConfig)> = None;
+    for range in device.supported_input_configs()? {
+        if range.channels() != 2 {
+            continue;
+        }
+        if !(range.min_sample_rate() <= 44_100 && range.max_sample_rate() >= 44_100) {
+            continue;
+        }
+
+        let score = match range.sample_format() {
+            // Prefer matching Shairport's common ALSA loopback format exactly.
+            SampleFormat::I16 => 0,
+            // F32 is typically robust if I16 is unavailable.
+            SampleFormat::F32 => 1,
+            _ => 2,
+        };
+        let candidate = range.with_sample_rate(44_100);
+        let should_replace = match &best {
+            None => true,
+            Some((best_score, _)) => score < *best_score,
+        };
+        if should_replace {
+            best = Some((score, candidate));
+        }
+    }
+
+    Ok(best.map(|(_, config)| config))
 }
 
 fn parse_indexed_name(name: &str) -> Option<(String, usize)> {
