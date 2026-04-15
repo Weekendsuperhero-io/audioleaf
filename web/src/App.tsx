@@ -10,6 +10,7 @@ import {
   type DeviceStateUpdateRequest,
   type NowPlayingResponse,
   type VisualizerSettingsUpdateRequest,
+  type VisualizerStatusResponse,
   type VisualizerSortUpdateRequest,
   type HealthResponse,
   type PaletteEntry,
@@ -182,6 +183,9 @@ function App() {
   const [livePreviewColorsByPanel, setLivePreviewColorsByPanel] = useState<
     Record<number, [number, number, number]>
   >({});
+  const [visualizerStatus, setVisualizerStatus] = useState<VisualizerStatusResponse | null>(
+    null,
+  );
   const [nowPlaying, setNowPlaying] = useState<NowPlayingResponse | null>(null);
   const brightnessCommitTimersRef = useRef<Record<string, number>>({});
   const lastAppliedBrightnessRef = useRef<Record<string, number>>({});
@@ -263,6 +267,12 @@ function App() {
         } catch {
           // Keep UI usable even if backend enumeration is unavailable.
         }
+        let visualizerStatusData: VisualizerStatusResponse | null = null;
+        try {
+          visualizerStatusData = await api.visualizerStatus();
+        } catch {
+          // Keep UI usable if stream status endpoint is temporarily unavailable.
+        }
 
         if (!isMounted) {
           return;
@@ -280,6 +290,7 @@ function App() {
             ? audioBackendsData.available_audio_backends
             : ["default"];
         setAudioBackends(availableBackends);
+        setVisualizerStatus(visualizerStatusData);
         setPalettes(palettesData);
         setNowPlaying(nowPlayingData);
         hydrateVisualizerDrafts(
@@ -375,6 +386,34 @@ function App() {
     };
 
     void pollNowPlaying();
+
+    return () => {
+      cancelled = true;
+      if (timerId !== undefined) {
+        window.clearTimeout(timerId);
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timerId: number | undefined;
+    const pollVisualizerStatus = async () => {
+      try {
+        const snapshot = await api.visualizerStatus();
+        if (!cancelled) {
+          setVisualizerStatus(snapshot);
+        }
+      } catch {
+        // Keep previous status visible if polling fails.
+      } finally {
+        if (!cancelled) {
+          timerId = window.setTimeout(() => void pollVisualizerStatus(), 1200);
+        }
+      }
+    };
+
+    void pollVisualizerStatus();
 
     return () => {
       cancelled = true;
@@ -831,6 +870,11 @@ function App() {
             <DataRow label="Health">
               {health?.status ?? (loadState === "loading" ? "Loading..." : "-")}
             </DataRow>
+            <DataRow label="Stream status">
+              <Badge variant={visualizerStatus?.status === "Healthy" ? "default" : "secondary"}>
+                {visualizerStatus?.status ?? (loadState === "loading" ? "Loading..." : "Unknown")}
+              </Badge>
+            </DataRow>
             <DataRow label="Config file">
               {config?.paths.config_file_path ?? "-"}
             </DataRow>
@@ -1036,34 +1080,20 @@ function App() {
                   <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
                     <label className="space-y-1 text-xs text-muted-foreground">
                       <span>Audio backend</span>
-                      <input
-                        list="audio-backend-options"
+                      <select
                         className="h-10 w-full rounded-md border border-input bg-background px-3 text-sm text-foreground"
                         value={settingsDraft.audio_backend}
                         onChange={(event) => {
-                          const value = event.currentTarget.value;
-                          setSettingsDraft((prev) => ({
-                            ...prev,
-                            audio_backend: value,
-                          }));
+                          handleAudioBackendChange(event.currentTarget.value);
                         }}
-                        onBlur={(event) => handleAudioBackendChange(event.currentTarget.value)}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.preventDefault();
-                            event.currentTarget.blur();
-                          }
-                        }}
-                        placeholder="default or hw:Loopback,1,0"
                         disabled={savingConfigSection !== null}
-                      />
-                      <datalist id="audio-backend-options">
+                      >
                         {availableBackendOptions.map((backend) => (
                           <option key={backend} value={backend}>
                             {backend}
                           </option>
                         ))}
-                      </datalist>
+                      </select>
                     </label>
 
                     <label className="space-y-1 text-xs text-muted-foreground">

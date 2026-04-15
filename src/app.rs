@@ -119,6 +119,7 @@ impl App {
             &nl_device,
             Arc::clone(&shared_colors),
         )?
+        .with_stream_health(Arc::new(Mutex::new(visualizer::StreamHealth::Starting)))
         .init();
         // Keep VisualizerMsg::Ping live across all binaries; no-op for the visualizer state machine.
         let _ = tx.send(visualizer::VisualizerMsg::Ping);

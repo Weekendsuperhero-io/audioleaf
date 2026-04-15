@@ -19,15 +19,32 @@ use std::{
     time::{Duration, Instant},
 };
 
-const STREAM_ERROR_WINDOW: Duration = Duration::from_secs(5);
-const STREAM_ERROR_THRESHOLD: usize = 8;
+const STREAM_ERROR_WINDOW: Duration = Duration::from_secs(1);
+const STREAM_ERROR_THRESHOLD: usize = 3;
+const STREAM_SOFT_RECOVERY_GRACE: Duration = Duration::from_millis(750);
+const STREAM_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(2);
 const AUDIO_RECV_TIMEOUT: Duration = Duration::from_millis(250);
+
+#[derive(Debug, Clone, Copy)]
+enum StreamFault {
+    PollErrBurst,
+}
 
 #[derive(Debug, Default)]
 enum VisualizerState {
     #[default]
     Running,
     Done,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StreamHealth {
+    #[default]
+    Starting,
+    Healthy,
+    Degraded,
+    Restarting,
+    Stopped,
 }
 
 #[derive(Debug, Clone)]
@@ -62,6 +79,7 @@ pub struct Visualizer {
     hues: Vec<[u8; 3]>,
     effect: Effect,
     shared_colors: Arc<Mutex<HashMap<u16, [u8; 3]>>>,
+    stream_health: Option<Arc<Mutex<StreamHealth>>>,
 }
 
 impl Visualizer {
@@ -128,7 +146,13 @@ impl Visualizer {
             hues,
             effect,
             shared_colors,
+            stream_health: None,
         })
+    }
+
+    pub fn with_stream_health(mut self, stream_health: Arc<Mutex<StreamHealth>>) -> Self {
+        self.stream_health = Some(stream_health);
+        self
     }
 
     /// Sends a UDP frame setting all panels to black with instant transition.
@@ -271,7 +295,83 @@ impl Visualizer {
         {
             let _ = guard.pop_front();
         }
-        guard.len() >= STREAM_ERROR_THRESHOLD
+        guard.len() == STREAM_ERROR_THRESHOLD
+    }
+
+    fn clear_stream_error_window(window: &Arc<Mutex<VecDeque<Instant>>>) {
+        if let Ok(mut guard) = window.lock() {
+            guard.clear();
+        }
+    }
+
+    fn log_stream_error_throttled(
+        log_state: &Arc<Mutex<HashMap<String, (Instant, u32)>>>,
+        key: &str,
+        message: &str,
+    ) {
+        let now = Instant::now();
+        let mut guard = match log_state.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                eprintln!("WARNING: {}", message);
+                return;
+            }
+        };
+
+        let entry = guard.entry(key.to_string()).or_insert((now, 0));
+        let elapsed = now.duration_since(entry.0);
+        if elapsed >= STREAM_ERROR_LOG_INTERVAL {
+            if entry.1 > 0 {
+                eprintln!(
+                    "WARNING: {} (repeated {} additional times)",
+                    message, entry.1
+                );
+            } else {
+                eprintln!("WARNING: {}", message);
+            }
+            *entry = (now, 0);
+            return;
+        }
+
+        if entry.0 == now {
+            eprintln!("WARNING: {}", message);
+            return;
+        }
+        entry.1 = entry.1.saturating_add(1);
+    }
+
+    fn process_stream_faults(
+        rx_stream_fault: &mpsc::Receiver<StreamFault>,
+        degraded_since: &mut Option<Instant>,
+        stream_health: &Option<Arc<Mutex<StreamHealth>>>,
+    ) {
+        loop {
+            match rx_stream_fault.try_recv() {
+                Ok(StreamFault::PollErrBurst) => {
+                    if degraded_since.is_none() {
+                        *degraded_since = Some(Instant::now());
+                        Self::set_stream_health(stream_health, StreamHealth::Degraded);
+                        eprintln!(
+                            "WARNING: stream entered degraded mode after repeated POLLERR; waiting briefly for soft recovery."
+                        );
+                    }
+                }
+                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return,
+            }
+        }
+    }
+
+    fn set_stream_health(stream_health: &Option<Arc<Mutex<StreamHealth>>>, next: StreamHealth) {
+        if let Some(shared) = stream_health
+            && let Ok(mut guard) = shared.lock()
+            && *guard != next
+        {
+            *guard = next;
+        }
+    }
+
+    fn should_escalate_degraded_stream(degraded_since: Option<Instant>) -> bool {
+        degraded_since.is_some_and(|start| start.elapsed() >= STREAM_SOFT_RECOVERY_GRACE)
     }
 
     fn process_pending_events(
@@ -294,13 +394,6 @@ impl Visualizer {
         }
     }
 
-    fn should_stop_from_stream_fault(rx_stream_fault: &mpsc::Receiver<()>) -> bool {
-        match rx_stream_fault.try_recv() {
-            Ok(_) | Err(TryRecvError::Disconnected) => true,
-            Err(TryRecvError::Empty) => false,
-        }
-    }
-
     /// Completes visualizer setup by starting audio capture stream and spawning processing thread.
     ///
     /// Builds and plays CPAL input stream matched to sample format, sending mono max samples via channel.
@@ -320,11 +413,14 @@ impl Visualizer {
         let (tx_events, rx_events) = mpsc::channel();
         thread::spawn(move || {
             panic::register_backtrace_panic_handler();
+            Self::set_stream_health(&self.stream_health, StreamHealth::Starting);
             let (tx_audio, rx_audio) = mpsc::channel();
             let (tx_stream_fault, rx_stream_fault) = mpsc::channel();
             let stream_error_window: Arc<Mutex<VecDeque<Instant>>> = Arc::new(Mutex::new(
                 VecDeque::with_capacity(STREAM_ERROR_THRESHOLD + 1),
             ));
+            let stream_error_logs: Arc<Mutex<HashMap<String, (Instant, u32)>>> =
+                Arc::new(Mutex::new(HashMap::new()));
             macro_rules! build_input_stream {
                 ($type:ty) => {
                     self.audio_stream.device.build_input_stream(
@@ -336,13 +432,28 @@ impl Visualizer {
                         {
                             let tx_stream_fault = tx_stream_fault.clone();
                             let stream_error_window = Arc::clone(&stream_error_window);
+                            let stream_error_logs = Arc::clone(&stream_error_logs);
                             move |err| {
-                                eprintln!("WARNING: audio input stream callback error: {}", err);
-                                if Self::should_restart_after_stream_error(
-                                    &stream_error_window,
-                                    Instant::now(),
-                                ) {
-                                    let _ = tx_stream_fault.send(());
+                                let err_text = err.to_string();
+                                let is_pollerr = err_text.contains("POLLERR");
+                                let error_key = if is_pollerr {
+                                    "pollerr".to_string()
+                                } else {
+                                    err_text.clone()
+                                };
+                                Self::log_stream_error_throttled(
+                                    &stream_error_logs,
+                                    &error_key,
+                                    &format!("audio input stream callback error: {}", err_text),
+                                );
+
+                                if is_pollerr
+                                    && Self::should_restart_after_stream_error(
+                                        &stream_error_window,
+                                        Instant::now(),
+                                    )
+                                {
+                                    let _ = tx_stream_fault.send(StreamFault::PollErrBurst);
                                 }
                             }
                         },
@@ -362,6 +473,7 @@ impl Visualizer {
                 SampleFormat::F32 => build_input_stream!(f32),
                 SampleFormat::F64 => build_input_stream!(f64),
                 _ => {
+                    Self::set_stream_health(&self.stream_health, StreamHealth::Stopped);
                     eprintln!(
                         "WARNING: Unsupported sample format for live visualizer: {:?}",
                         self.audio_stream.sample_format
@@ -372,14 +484,17 @@ impl Visualizer {
             let stream = match stream_result {
                 Ok(stream) => stream,
                 Err(err) => {
+                    Self::set_stream_health(&self.stream_health, StreamHealth::Stopped);
                     eprintln!("WARNING: stream initialization failed: {}", err);
                     return;
                 }
             };
             if let Err(err) = stream.play() {
+                Self::set_stream_health(&self.stream_health, StreamHealth::Stopped);
                 eprintln!("WARNING: running the audio stream failed: {}", err);
                 return;
             }
+            Self::set_stream_health(&self.stream_health, StreamHealth::Healthy);
 
             let n = self.nl_udp.panels.len();
             let sample_rate = self.audio_stream.stream_config.sample_rate;
@@ -390,15 +505,22 @@ impl Visualizer {
             let mut brightness = vec![0.0_f32; n];
             let mut prev_max = vec![0.0; n];
             let mut speed = vec![0.0; n];
+            let mut degraded_since: Option<Instant> = None;
             // Clear any colors left over from a previous Nanoleaf scene or effect
             self.send_black_frame(n);
             loop {
                 if matches!(self.state, VisualizerState::Done) {
                     break;
                 }
-                if Self::should_stop_from_stream_fault(&rx_stream_fault) {
+                Self::process_stream_faults(
+                    &rx_stream_fault,
+                    &mut degraded_since,
+                    &self.stream_health,
+                );
+                if Self::should_escalate_degraded_stream(degraded_since) {
+                    Self::set_stream_health(&self.stream_health, StreamHealth::Restarting);
                     eprintln!(
-                        "WARNING: audio stream entered repeated error state; stopping visualizer thread for recovery."
+                        "WARNING: stream soft recovery timeout reached; escalating to visualizer restart."
                     );
                     return;
                 }
@@ -414,12 +536,33 @@ impl Visualizer {
                 let to_collect = ((sample_rate as f32) * self.time_window).round() as usize;
                 let mut samples = Vec::with_capacity(2 * to_collect);
                 while samples.len() < to_collect {
+                    Self::process_stream_faults(
+                        &rx_stream_fault,
+                        &mut degraded_since,
+                        &self.stream_health,
+                    );
+                    if Self::should_escalate_degraded_stream(degraded_since) {
+                        Self::set_stream_health(&self.stream_health, StreamHealth::Restarting);
+                        eprintln!(
+                            "WARNING: stream soft recovery timeout reached; escalating to visualizer restart."
+                        );
+                        return;
+                    }
                     let mut new_samples = match rx_audio.recv_timeout(AUDIO_RECV_TIMEOUT) {
                         Ok(samples) => samples,
                         Err(RecvTimeoutError::Timeout) => {
-                            if Self::should_stop_from_stream_fault(&rx_stream_fault) {
+                            Self::process_stream_faults(
+                                &rx_stream_fault,
+                                &mut degraded_since,
+                                &self.stream_health,
+                            );
+                            if Self::should_escalate_degraded_stream(degraded_since) {
+                                Self::set_stream_health(
+                                    &self.stream_health,
+                                    StreamHealth::Restarting,
+                                );
                                 eprintln!(
-                                    "WARNING: audio stream entered repeated error state; stopping visualizer thread for recovery."
+                                    "WARNING: stream soft recovery timeout reached; escalating to visualizer restart."
                                 );
                                 return;
                             }
@@ -438,6 +581,7 @@ impl Visualizer {
                             continue;
                         }
                         Err(RecvTimeoutError::Disconnected) => {
+                            Self::set_stream_health(&self.stream_health, StreamHealth::Restarting);
                             eprintln!(
                                 "WARNING: audio sample channel disconnected; stopping thread."
                             );
@@ -446,6 +590,12 @@ impl Visualizer {
                     };
                     samples.append(&mut new_samples);
                 }
+                if degraded_since.take().is_some() {
+                    Self::clear_stream_error_window(&stream_error_window);
+                    Self::set_stream_health(&self.stream_health, StreamHealth::Healthy);
+                    eprintln!("INFO: stream soft recovery succeeded; continuing visualizer.");
+                }
+                Self::set_stream_health(&self.stream_health, StreamHealth::Healthy);
                 let spectrum = processing::process(samples, self.gain);
                 let hz_per_bin = (sample_rate / 2) / (spectrum.len() as u32);
                 match self.effect {
@@ -508,6 +658,7 @@ impl Visualizer {
                     }
                 }
             }
+            Self::set_stream_health(&self.stream_health, StreamHealth::Stopped);
         });
 
         tx_events

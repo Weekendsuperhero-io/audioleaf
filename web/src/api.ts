@@ -142,6 +142,18 @@ export type VisualizerPreviewResponse = {
   panel_colors: VisualizerPreviewPanelColor[];
 };
 
+export type VisualizerStatusResponse = {
+  status: string;
+  stream_health: string;
+  live_visualizer_attached: boolean;
+  restart_cooldown_active: boolean;
+  consecutive_restart_failures: number;
+  healthy_ping_streak: number;
+  auto_fallback_to_default_active: boolean;
+  current_audio_backend: string | null;
+  device: DeviceSummary | null;
+};
+
 async function apiGet<T>(path: string): Promise<T> {
   const response = await fetch(path);
   return parseResponse<T>(response);
@@ -219,6 +231,8 @@ export const api = {
     }),
   visualizerPreview: () =>
     apiGet<VisualizerPreviewResponse>("/api/visualizer/preview"),
+  visualizerStatus: () =>
+    apiGet<VisualizerStatusResponse>("/api/visualizer/status"),
   audioBackends: () => apiGet<AudioBackendsResponse>("/api/audio/backends"),
   devices: () => apiGet<DevicesResponse>("/api/devices"),
   deviceInfo: (name: string) =>
