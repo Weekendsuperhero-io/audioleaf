@@ -154,9 +154,22 @@ export type VisualizerStatusResponse = {
   device: DeviceSummary | null;
 };
 
-const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)
-  ?.trim()
-  .replace(/\/+$/, "");
+function inferApiBaseUrl(): string {
+  if (typeof window === "undefined") {
+    return "";
+  }
+  const { protocol, hostname, port } = window.location;
+  // In local Vite dev/preview, default API to the Rust backend on 8787.
+  if (port === "5173" || port === "4173") {
+    return `${protocol}//${hostname}:8787`;
+  }
+  return "";
+}
+
+const API_BASE_URL =
+  (import.meta.env.VITE_API_BASE_URL as string | undefined)
+    ?.trim()
+    .replace(/\/+$/, "") || inferApiBaseUrl();
 
 function apiPath(path: string): string {
   if (!API_BASE_URL) {
