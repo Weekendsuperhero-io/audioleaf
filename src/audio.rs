@@ -1,6 +1,6 @@
 use crate::constants;
 use anyhow::{Result, bail};
-use cpal::{Device, SampleFormat, StreamConfig, traits::*};
+use cpal::{BufferSize, Device, SampleFormat, StreamConfig, traits::*};
 use hashbrown::HashMap;
 
 pub struct AudioStream {
@@ -223,7 +223,14 @@ fn select_input_stream_profile(
     if should_prefer_loopback_profile(device, requested_name)
         && let Some(profile) = pick_loopback_44100_profile(device)?
     {
-        return Ok((profile.sample_format(), profile.config()));
+        let sample_format = profile.sample_format();
+        let mut stream_config = profile.config();
+        // CPAL's default buffer on ALSA aloop is ~1024 frames (~23ms). That's too small:
+        // the first timing hiccup causes an XRUN, after which CPAL prepares the stream
+        // and leaves it stuck in PREPARED state with no data flowing. 8192 frames (~186ms)
+        // matches the visualizer's time_window and survives normal jitter.
+        stream_config.buffer_size = BufferSize::Fixed(8192);
+        return Ok((sample_format, stream_config));
     }
 
     let audio_config = device.default_input_config()?;
