@@ -68,7 +68,7 @@ sudo apt-get install -y --no-install-recommends \
   libpopt-dev libconfig-dev libasound2-dev \
   avahi-daemon libavahi-client-dev libssl-dev libsoxr-dev \
   libplist-dev libsodium-dev uuid-dev libgcrypt-dev xxd libplist-utils \
-  libavutil-dev libavcodec-dev libavformat-dev libswresample-dev
+  libavutil-dev libavcodec-dev libavformat-dev libswresample-dev ffmpeg
 sudo apt-get install -y --no-install-recommends systemd-dev || true
 
 echo "[5/11] Configure ALSA loopback module"
@@ -94,9 +94,10 @@ if [[ ! -d shairport-sync ]]; then git clone https://github.com/mikebrady/shairp
 cd shairport-sync
 git pull --ff-only || true
 autoreconf -fi
+# AirPlay 2 requires Avahi + OpenSSL. FFmpeg decode/transcode support is enabled automatically
+# in AirPlay 2 builds, but we still verify it in the version string below.
 ./configure --sysconfdir=/etc --with-alsa --with-soxr --with-avahi \
-  --with-ssl=openssl --with-systemd-startup --with-airplay-2 \
-  --with-ffmpeg --with-metadata
+  --with-ssl=openssl --with-systemd-startup --with-airplay-2 --with-metadata
 make -j"$(nproc)"
 sudo make install
 
@@ -142,6 +143,16 @@ if ! echo "${SHAIRPORT_VERSION}" | grep -qi "ffmpeg"; then
   exit 1
 fi
 echo "OK: ${SHAIRPORT_VERSION}"
+
+echo
+echo "Verify FFmpeg AAC decoder supports fltp (required for AirPlay 2 buffered AAC):"
+AAC_DECODER_INFO="$(ffmpeg -hide_banner -h decoder=aac 2>/dev/null || true)"
+if ! echo "${AAC_DECODER_INFO}" | grep -qi "Supported sample formats:.*fltp"; then
+  echo "ERROR: ffmpeg AAC decoder does not report fltp support." >&2
+  echo "Install/repair FFmpeg so decoder=aac supports planar float." >&2
+  exit 1
+fi
+echo "OK: AAC decoder reports fltp support."
 
 echo
 echo "Service status:"
