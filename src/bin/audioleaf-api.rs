@@ -440,7 +440,9 @@ async fn main() -> Result<()> {
         metadata_pipe_path
     );
 
+    eprintln!("DEBUG: about to spawn heartbeat task");
     tokio::spawn(async {
+        eprintln!("DEBUG: heartbeat task STARTED");
         let mut count: u64 = 0;
         loop {
             tokio::time::sleep(Duration::from_secs(5)).await;
@@ -448,6 +450,7 @@ async fn main() -> Result<()> {
             eprintln!("DEBUG: tokio heartbeat #{count}");
         }
     });
+    eprintln!("DEBUG: heartbeat spawned, continuing main");
 
     let app = Router::new()
         .route("/api/health", get(get_health))
