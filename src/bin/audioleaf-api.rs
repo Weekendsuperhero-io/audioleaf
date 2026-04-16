@@ -11,6 +11,8 @@ use base64::Engine;
 use clap::Parser;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
+use quick_xml::Reader as XmlReader;
+use quick_xml::events::Event as XmlEvent;
 use serde::{Deserialize, Serialize};
 use std::{
     fs::OpenOptions,
@@ -433,22 +435,12 @@ async fn main() -> Result<()> {
     } else {
         println!("Live visualizer initialized.");
     }
-    // TEMPORARY: metadata reader disabled to isolate tokio-freeze cause
-    // start_now_playing_reader(&state);
+    start_now_playing_reader(&state);
     start_live_visualizer_watchdog(&state);
-    eprintln!("DEBUG: metadata reader DISABLED for diagnosis; pipe: {metadata_pipe_path}");
-
-    eprintln!("DEBUG: about to spawn heartbeat task");
-    tokio::spawn(async {
-        eprintln!("DEBUG: heartbeat task STARTED");
-        let mut count: u64 = 0;
-        loop {
-            tokio::time::sleep(Duration::from_secs(5)).await;
-            count += 1;
-            eprintln!("DEBUG: tokio heartbeat #{count}");
-        }
-    });
-    eprintln!("DEBUG: heartbeat spawned, continuing main");
+    println!(
+        "Now-playing metadata reader initialized (pipe: {}).",
+        metadata_pipe_path
+    );
 
     let app = Router::new()
         .route("/api/health", get(get_health))
@@ -1007,13 +999,15 @@ fn start_now_playing_reader(state: &ApiState) {
 
             match OpenOptions::new().read(true).open(&metadata_pipe_path) {
                 Ok(file) => {
-                    let mut guard = state.now_playing.lock();
-                    guard.reader_running = true;
-                    guard.last_error = None;
-                    guard.updated_at_ms = Some(now_unix_ms());
+                    {
+                        let mut guard = state.now_playing.lock();
+                        guard.reader_running = true;
+                        guard.last_error = None;
+                        guard.updated_at_ms = Some(now_unix_ms());
+                    }
 
-                    let mut reader = BufReader::new(file);
-                    let result = process_shairport_metadata_stream(&state, &mut reader);
+                    let reader = BufReader::new(file);
+                    let result = process_shairport_metadata_stream(&state, reader);
 
                     let mut guard = state.now_playing.lock();
                     guard.reader_running = false;
@@ -1072,155 +1066,116 @@ async fn run_live_visualizer_watchdog_tick(state: &ApiState) -> Result<(), ApiEr
     recover_live_visualizer(state, "watchdog health check").await
 }
 
+/// Shairport Sync writes a stream of `<item>` elements to the metadata pipe.
+/// Each item looks like:
+///   <item><type>636f7265</type><code>61736172</code><length>26</length>
+///   <data encoding="base64">
+///   RE1ORFMgJiBEYW5jZSBGcnVpdHMgTXVzaWM=</data></item>
+/// Large payloads (cover art) span many base64 lines before `</data></item>`.
+/// This parser uses quick-xml to handle all shapes robustly (inline or multi-line,
+/// with or without `<data>`).
 fn process_shairport_metadata_stream<R: BufRead>(
     state: &ApiState,
-    reader: &mut R,
+    reader: R,
 ) -> std::result::Result<(), String> {
+    let mut xml = XmlReader::from_reader(reader);
+    xml.config_mut().check_end_names = false;
+    xml.config_mut().trim_text(true);
+
+    #[derive(Default)]
+    struct Cursor {
+        in_item: bool,
+        current_tag: Option<String>,
+        type_hex: String,
+        code_hex: String,
+        length: usize,
+        encoded: String,
+        has_data: bool,
+    }
+    let mut cur = Cursor::default();
+    let mut buf: Vec<u8> = Vec::new();
+
     loop {
-        let mut header_line = String::new();
-        let read = reader
-            .read_line(&mut header_line)
-            .map_err(|err| format!("Failed to read metadata header: {}", err))?;
-        if read == 0 {
-            return Ok(());
-        }
-
-        let trimmed = header_line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-
-        let Some((item_type, code, payload_len)) = parse_metadata_header(trimmed) else {
-            continue;
-        };
-
-        let payload = if payload_len > 0 {
-            read_metadata_payload(reader, payload_len)?
-        } else {
-            Vec::new()
-        };
-
-        apply_metadata_item_to_state(state, &item_type, &code, payload);
-    }
-}
-
-fn parse_metadata_header(line: &str) -> Option<(String, String, usize)> {
-    let mut type_hex: Option<&str> = None;
-    let mut code_hex: Option<&str> = None;
-    let mut payload_len: Option<usize> = None;
-
-    for token in line.split(|ch: char| !ch.is_ascii_alphanumeric()) {
-        if token.is_empty() {
-            continue;
-        }
-        if type_hex.is_none() && token.len() == 8 && token.chars().all(|ch| ch.is_ascii_hexdigit())
-        {
-            type_hex = Some(token);
-            continue;
-        }
-        if type_hex.is_some()
-            && code_hex.is_none()
-            && token.len() == 8
-            && token.chars().all(|ch| ch.is_ascii_hexdigit())
-        {
-            code_hex = Some(token);
-            continue;
-        }
-        if type_hex.is_some()
-            && code_hex.is_some()
-            && payload_len.is_none()
-            && token.chars().all(|ch| ch.is_ascii_digit())
-        {
-            payload_len = token.parse::<usize>().ok();
-            break;
-        }
-    }
-
-    let item_type = decode_fourcc(type_hex?)?.to_ascii_lowercase();
-    let code = decode_fourcc(code_hex?)?;
-    Some((item_type, code, payload_len?))
-}
-
-fn read_metadata_payload<R: BufRead>(
-    reader: &mut R,
-    payload_len: usize,
-) -> std::result::Result<Vec<u8>, String> {
-    let mut first_line = String::new();
-    let first_read = reader
-        .read_line(&mut first_line)
-        .map_err(|err| format!("Failed to read payload line: {}", err))?;
-    if first_read == 0 {
-        return Err("Unexpected EOF before payload.".to_string());
-    }
-
-    let mut payload_line = first_line.trim().to_string();
-    if payload_line.is_empty() {
-        let mut second_line = String::new();
-        let second_read = reader
-            .read_line(&mut second_line)
-            .map_err(|err| format!("Failed to read payload line: {}", err))?;
-        if second_read == 0 {
-            return Err("Unexpected EOF while reading payload.".to_string());
-        }
-        payload_line = second_line.trim().to_string();
-    }
-
-    // shairport-sync-metadata-reader may wrap base64 payloads as:
-    // <data encoding="base64">
-    // ...
-    // </data>
-    if payload_line.starts_with("<data") {
-        let mut encoded = String::new();
-        if let Some((_, after_gt)) = payload_line.split_once('>')
-            && let Some((inline, _)) = after_gt.split_once("</data>")
-        {
-            encoded.push_str(inline.trim());
-        }
-
-        while encoded.is_empty() {
-            let mut line = String::new();
-            let read = reader
-                .read_line(&mut line)
-                .map_err(|err| format!("Failed to read wrapped payload: {}", err))?;
-            if read == 0 {
-                return Err("Unexpected EOF while reading wrapped payload.".to_string());
+        buf.clear();
+        match xml.read_event_into(&mut buf) {
+            Ok(XmlEvent::Start(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                match name.as_str() {
+                    "item" => {
+                        cur = Cursor {
+                            in_item: true,
+                            ..Cursor::default()
+                        }
+                    }
+                    "type" | "code" | "length" | "data" if cur.in_item => {
+                        cur.current_tag = Some(name.clone());
+                        if name == "data" {
+                            cur.has_data = true;
+                        }
+                    }
+                    _ => {}
+                }
             }
-
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
+            Ok(XmlEvent::Text(e)) => {
+                if !cur.in_item {
+                    continue;
+                }
+                // Shairport emits hex (type/code/length) and base64 (data) only,
+                // so plain UTF-8 decode is sufficient; no XML-entity unescaping needed.
+                let text = std::str::from_utf8(e.as_ref()).unwrap_or("");
+                match cur.current_tag.as_deref() {
+                    Some("type") => cur.type_hex.push_str(text.trim()),
+                    Some("code") => cur.code_hex.push_str(text.trim()),
+                    Some("length") => {
+                        cur.length = text.trim().parse().unwrap_or(0);
+                    }
+                    Some("data") => {
+                        for part in text.split_whitespace() {
+                            cur.encoded.push_str(part);
+                        }
+                    }
+                    _ => {}
+                }
             }
-            if trimmed.starts_with("</data") {
-                break;
+            Ok(XmlEvent::CData(e)) => {
+                if cur.current_tag.as_deref() == Some("data") {
+                    let bytes = e.into_inner();
+                    for part in std::str::from_utf8(&bytes).unwrap_or("").split_whitespace() {
+                        cur.encoded.push_str(part);
+                    }
+                }
             }
-            if trimmed.starts_with('<') {
-                continue;
+            Ok(XmlEvent::End(e)) => {
+                let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
+                if name == "item" {
+                    if !cur.type_hex.is_empty() && !cur.code_hex.is_empty() {
+                        let item_type = decode_fourcc(&cur.type_hex)
+                            .map(|s| s.to_ascii_lowercase())
+                            .unwrap_or_default();
+                        let code = decode_fourcc(&cur.code_hex).unwrap_or_default();
+                        let payload = if cur.has_data && !cur.encoded.is_empty() {
+                            base64::engine::general_purpose::STANDARD
+                                .decode(cur.encoded.as_bytes())
+                                .unwrap_or_default()
+                        } else {
+                            Vec::new()
+                        };
+                        if !item_type.is_empty() && !code.is_empty() {
+                            apply_metadata_item_to_state(state, &item_type, &code, payload);
+                        }
+                    }
+                    cur = Cursor::default();
+                } else if cur.current_tag.as_deref() == Some(name.as_str()) {
+                    cur.current_tag = None;
+                }
             }
-            encoded.push_str(trimmed);
+            Ok(XmlEvent::Eof) => return Ok(()),
+            Ok(_) => {}
+            Err(err) => {
+                return Err(format!("Metadata XML parse error: {err}"));
+            }
         }
-
-        let mut decoded = base64::engine::general_purpose::STANDARD
-            .decode(encoded.trim())
-            .unwrap_or_default();
-        if decoded.len() > payload_len {
-            decoded.truncate(payload_len);
-        }
-        return Ok(decoded);
     }
-
-    // If we encounter an unexpected XML tag, skip this payload item silently.
-    // Returning an error here causes noisy log spam and desync churn.
-    if payload_line.starts_with('<') {
-        return Ok(Vec::new());
-    }
-
-    let mut decoded = base64::engine::general_purpose::STANDARD
-        .decode(payload_line.trim())
-        .unwrap_or_else(|_| payload_line.as_bytes().to_vec());
-    if decoded.len() > payload_len {
-        decoded.truncate(payload_len);
-    }
-    Ok(decoded)
 }
 
 fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, payload: Vec<u8>) {
