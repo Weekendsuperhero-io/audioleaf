@@ -468,7 +468,12 @@ async fn main() -> Result<()> {
         .route("/api/devices/{name}/state", put(put_device_state))
         .route("/api/palettes", get(get_palettes))
         .with_state(state)
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any));
+        .layer(
+            CorsLayer::new()
+                .allow_origin(Any)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        );
 
     let addr: SocketAddr = format!("{}:{}", options.host, options.port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;

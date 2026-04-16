@@ -27,6 +27,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 const DEFAULT_BRIGHTNESS_DRAFT = "50";
@@ -1224,14 +1225,12 @@ function App() {
               <Badge variant={nowPlaying?.reader_running ? "default" : "secondary"}>
                 {nowPlaying?.reader_running ? "Reader Running" : "Reader Waiting"}
               </Badge>
-              <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-                <input
-                  type="checkbox"
+              <label className="inline-flex items-center gap-3 text-sm text-muted-foreground">
+                <Switch
                   checked={nowPlaying?.drive_visualizer_palette ?? false}
                   onChange={(event) =>
                     void handleNowPlayingDrivePaletteToggle(event.currentTarget.checked)
                   }
-                  className="h-4 w-4 accent-[hsl(var(--primary))]"
                   disabled={!nowPlaying}
                 />
                 Drive visualizer palette from artwork colors
@@ -1434,12 +1433,10 @@ function App() {
                     : "Default device layout is loading or unavailable."}
                 </CardDescription>
               </div>
-              <label className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-                <input
-                  type="checkbox"
+              <label className="inline-flex items-center gap-3 text-sm text-muted-foreground">
+                <Switch
                   checked={showLivePreview}
                   onChange={(event) => setShowLivePreview(event.currentTarget.checked)}
-                  className="h-4 w-4 accent-[hsl(var(--primary))]"
                 />
                 Show Live Animation
               </label>
@@ -1665,7 +1662,7 @@ function panelFillColor(
   if (liveRgb) {
     return `rgb(${liveRgb[0]}, ${liveRgb[1]}, ${liveRgb[2]})`;
   }
-  return "hsl(var(--primary) / 0.78)";
+  return "hsl(0 0% 96% / 0.92)";
 }
 
 function buildPanelPolygonPoints(panel: {
