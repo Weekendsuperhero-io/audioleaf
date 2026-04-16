@@ -154,13 +154,24 @@ export type VisualizerStatusResponse = {
   device: DeviceSummary | null;
 };
 
+const API_BASE_URL = (import.meta.env.VITE_API_BASE_URL as string | undefined)
+  ?.trim()
+  .replace(/\/+$/, "");
+
+function apiPath(path: string): string {
+  if (!API_BASE_URL) {
+    return path;
+  }
+  return `${API_BASE_URL}${path}`;
+}
+
 async function apiGet<T>(path: string): Promise<T> {
-  const response = await fetch(path);
+  const response = await fetch(apiPath(path));
   return parseResponse<T>(response);
 }
 
 async function apiSend<T>(path: string, init: RequestInit): Promise<T> {
-  const response = await fetch(path, init);
+  const response = await fetch(apiPath(path), init);
   return parseResponse<T>(response);
 }
 
@@ -252,3 +263,5 @@ export const api = {
     ),
   palettes: () => apiGet<PalettesResponse>("/api/palettes"),
 };
+
+export const apiAssetUrl = apiPath;

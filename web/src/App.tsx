@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   api,
+  apiAssetUrl,
   type AudioBackendsResponse,
   type ConfigResponse,
   type DeviceInfoResponse,
@@ -1247,7 +1248,9 @@ function App() {
               <div className="overflow-hidden rounded-md border border-border/70 bg-background/70">
                 {nowPlaying?.artwork_available ? (
                   <img
-                    src={`/api/now-playing/artwork?g=${nowPlaying.artwork_generation}`}
+                    src={apiAssetUrl(
+                      `/api/now-playing/artwork?g=${nowPlaying.artwork_generation}`,
+                    )}
                     alt="Album artwork"
                     className="h-[180px] w-full object-cover"
                   />

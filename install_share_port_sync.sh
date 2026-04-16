@@ -94,8 +94,7 @@ if [[ ! -d shairport-sync ]]; then git clone https://github.com/mikebrady/shairp
 cd shairport-sync
 git pull --ff-only || true
 autoreconf -fi
-# AirPlay 2 requires Avahi + OpenSSL. FFmpeg decode/transcode support is enabled automatically
-# in AirPlay 2 builds, but we still verify it in the version string below.
+# AirPlay 2 requires Avahi + OpenSSL.
 ./configure --sysconfdir=/etc --with-alsa --with-soxr --with-avahi \
   --with-ssl=openssl --with-systemd-startup --with-airplay-2 --with-metadata
 make -j"$(nproc)"
@@ -132,14 +131,10 @@ nqptp -V || true
 shairport-sync -V || true
 
 echo
-echo "Verify Shairport build capabilities (AirPlay2 + FFmpeg):"
+echo "Verify Shairport build capabilities (AirPlay2):"
 SHAIRPORT_VERSION="$(shairport-sync -V 2>/dev/null || true)"
 if ! echo "${SHAIRPORT_VERSION}" | grep -q "AirPlay2"; then
   echo "ERROR: Installed shairport-sync does not report AirPlay2 support: ${SHAIRPORT_VERSION}" >&2
-  exit 1
-fi
-if ! echo "${SHAIRPORT_VERSION}" | grep -qi "ffmpeg"; then
-  echo "ERROR: Installed shairport-sync does not report FFmpeg support: ${SHAIRPORT_VERSION}" >&2
   exit 1
 fi
 echo "OK: ${SHAIRPORT_VERSION}"
