@@ -6,11 +6,11 @@ use crate::{
     panic, processing, utils,
 };
 use anyhow::Result;
-use cpal::{InputCallbackInfo, SampleFormat, SizedSample, traits::*};
+use cpal::{InputCallbackInfo, SampleFormat, SizedSample, StreamError, traits::*};
 use dasp_sample::conv::ToSample;
 use palette::{FromColor, Oklch, Srgb};
 use std::{
-    collections::{HashMap, VecDeque},
+    collections::HashMap,
     sync::{
         Arc, Mutex,
         mpsc::{self, RecvTimeoutError, TryRecvError},
@@ -19,15 +19,79 @@ use std::{
     time::{Duration, Instant},
 };
 
-const STREAM_ERROR_WINDOW: Duration = Duration::from_secs(1);
-const STREAM_ERROR_THRESHOLD: usize = 3;
-const STREAM_SOFT_RECOVERY_GRACE: Duration = Duration::from_millis(750);
-const STREAM_ERROR_LOG_INTERVAL: Duration = Duration::from_secs(2);
+const STREAM_ERROR_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 const AUDIO_RECV_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Clone, Copy)]
 enum StreamFault {
-    PollErrBurst,
+    DeviceUnavailable,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum StreamErrorKind {
+    PollErr,
+    XRun,
+    DeviceUnavailable,
+    Other,
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+struct StreamErrorCounts {
+    pollerr: u64,
+    xrun: u64,
+    other: u64,
+    device_unavailable: u64,
+}
+
+impl StreamErrorCounts {
+    fn total(self) -> u64 {
+        self.pollerr + self.xrun + self.other + self.device_unavailable
+    }
+}
+
+#[derive(Debug)]
+struct StreamErrorTelemetry {
+    interval: StreamErrorCounts,
+    lifetime: StreamErrorCounts,
+    last_report: Instant,
+}
+
+impl StreamErrorTelemetry {
+    fn new() -> Self {
+        Self {
+            interval: StreamErrorCounts::default(),
+            lifetime: StreamErrorCounts::default(),
+            last_report: Instant::now(),
+        }
+    }
+
+    fn record(&mut self, kind: StreamErrorKind) {
+        let (interval_counter, lifetime_counter) = match kind {
+            StreamErrorKind::PollErr => (&mut self.interval.pollerr, &mut self.lifetime.pollerr),
+            StreamErrorKind::XRun => (&mut self.interval.xrun, &mut self.lifetime.xrun),
+            StreamErrorKind::Other => (&mut self.interval.other, &mut self.lifetime.other),
+            StreamErrorKind::DeviceUnavailable => (
+                &mut self.interval.device_unavailable,
+                &mut self.lifetime.device_unavailable,
+            ),
+        };
+        *interval_counter = interval_counter.saturating_add(1);
+        *lifetime_counter = lifetime_counter.saturating_add(1);
+    }
+
+    fn take_report_if_due(
+        &mut self,
+        now: Instant,
+    ) -> Option<(StreamErrorCounts, StreamErrorCounts)> {
+        if now.duration_since(self.last_report) < STREAM_ERROR_REPORT_INTERVAL {
+            return None;
+        }
+        let interval = self.interval;
+        let lifetime = self.lifetime;
+        self.interval = StreamErrorCounts::default();
+        self.last_report = now;
+        Some((interval, lifetime))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -280,84 +344,32 @@ impl Visualizer {
         move |data: &[T], _: &InputCallbackInfo| Self::send_samples(data, n_channels, &tx)
     }
 
-    fn should_restart_after_stream_error(
-        window: &Arc<Mutex<VecDeque<Instant>>>,
-        now: Instant,
-    ) -> bool {
-        let mut guard = match window.lock() {
-            Ok(guard) => guard,
-            Err(_) => return false,
-        };
-        guard.push_back(now);
-        while guard
-            .front()
-            .is_some_and(|timestamp| now.duration_since(*timestamp) > STREAM_ERROR_WINDOW)
-        {
-            let _ = guard.pop_front();
-        }
-        guard.len() == STREAM_ERROR_THRESHOLD
-    }
-
-    fn clear_stream_error_window(window: &Arc<Mutex<VecDeque<Instant>>>) {
-        if let Ok(mut guard) = window.lock() {
-            guard.clear();
-        }
-    }
-
-    fn log_stream_error_throttled(
-        log_state: &Arc<Mutex<HashMap<String, (Instant, u32)>>>,
-        key: &str,
-        message: &str,
-    ) {
-        let now = Instant::now();
-        let mut guard = match log_state.lock() {
-            Ok(guard) => guard,
-            Err(_) => {
-                eprintln!("WARNING: {}", message);
-                return;
+    fn classify_stream_error(err: &StreamError, err_text: &str) -> StreamErrorKind {
+        match err {
+            StreamError::DeviceNotAvailable | StreamError::StreamInvalidated => {
+                StreamErrorKind::DeviceUnavailable
             }
-        };
-
-        let entry = guard.entry(key.to_string()).or_insert((now, 0));
-        let elapsed = now.duration_since(entry.0);
-        if elapsed >= STREAM_ERROR_LOG_INTERVAL {
-            if entry.1 > 0 {
-                eprintln!(
-                    "WARNING: {} (repeated {} additional times)",
-                    message, entry.1
-                );
-            } else {
-                eprintln!("WARNING: {}", message);
-            }
-            *entry = (now, 0);
-            return;
-        }
-
-        if entry.0 == now {
-            eprintln!("WARNING: {}", message);
-            return;
-        }
-        entry.1 = entry.1.saturating_add(1);
-    }
-
-    fn process_stream_faults(
-        rx_stream_fault: &mpsc::Receiver<StreamFault>,
-        degraded_since: &mut Option<Instant>,
-        stream_health: &Option<Arc<Mutex<StreamHealth>>>,
-    ) {
-        loop {
-            match rx_stream_fault.try_recv() {
-                Ok(StreamFault::PollErrBurst) => {
-                    if degraded_since.is_none() {
-                        *degraded_since = Some(Instant::now());
-                        Self::set_stream_health(stream_health, StreamHealth::Degraded);
-                        eprintln!(
-                            "WARNING: stream entered degraded mode after repeated POLLERR; waiting briefly for soft recovery."
-                        );
-                    }
+            StreamError::BufferUnderrun => StreamErrorKind::XRun,
+            StreamError::BackendSpecific { .. } => {
+                if err_text.contains("Buffer underrun/overrun occurred") {
+                    StreamErrorKind::XRun
+                } else if err_text.contains("POLLERR") {
+                    StreamErrorKind::PollErr
+                } else if err_text.contains("device is no longer available")
+                    || err_text.contains("not available")
+                {
+                    StreamErrorKind::DeviceUnavailable
+                } else {
+                    StreamErrorKind::Other
                 }
-                Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => return,
             }
+        }
+    }
+
+    fn process_stream_faults(rx_stream_fault: &mpsc::Receiver<StreamFault>) -> bool {
+        match rx_stream_fault.try_recv() {
+            Ok(StreamFault::DeviceUnavailable) => true,
+            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => false,
         }
     }
 
@@ -370,8 +382,39 @@ impl Visualizer {
         }
     }
 
-    fn should_escalate_degraded_stream(degraded_since: Option<Instant>) -> bool {
-        degraded_since.is_some_and(|start| start.elapsed() >= STREAM_SOFT_RECOVERY_GRACE)
+    fn report_stream_errors_if_due(
+        stream_errors: &Arc<Mutex<StreamErrorTelemetry>>,
+        stream_health: &Option<Arc<Mutex<StreamHealth>>>,
+    ) {
+        let report = {
+            let mut guard = match stream_errors.lock() {
+                Ok(guard) => guard,
+                Err(_) => return,
+            };
+            guard.take_report_if_due(Instant::now())
+        };
+
+        let Some((interval, lifetime)) = report else {
+            return;
+        };
+        if interval.total() == 0 {
+            Self::set_stream_health(stream_health, StreamHealth::Healthy);
+            return;
+        }
+        Self::set_stream_health(stream_health, StreamHealth::Degraded);
+
+        eprintln!(
+            "INFO: audio stream errors (last {}s) xrun={} pollerr={} other={} device_unavailable={} | lifetime xrun={} pollerr={} other={} device_unavailable={}",
+            STREAM_ERROR_REPORT_INTERVAL.as_secs(),
+            interval.xrun,
+            interval.pollerr,
+            interval.other,
+            interval.device_unavailable,
+            lifetime.xrun,
+            lifetime.pollerr,
+            lifetime.other,
+            lifetime.device_unavailable
+        );
     }
 
     fn process_pending_events(
@@ -416,11 +459,7 @@ impl Visualizer {
             Self::set_stream_health(&self.stream_health, StreamHealth::Starting);
             let (tx_audio, rx_audio) = mpsc::channel();
             let (tx_stream_fault, rx_stream_fault) = mpsc::channel();
-            let stream_error_window: Arc<Mutex<VecDeque<Instant>>> = Arc::new(Mutex::new(
-                VecDeque::with_capacity(STREAM_ERROR_THRESHOLD + 1),
-            ));
-            let stream_error_logs: Arc<Mutex<HashMap<String, (Instant, u32)>>> =
-                Arc::new(Mutex::new(HashMap::new()));
+            let stream_errors = Arc::new(Mutex::new(StreamErrorTelemetry::new()));
             macro_rules! build_input_stream {
                 ($type:ty) => {
                     self.audio_stream.device.build_input_stream(
@@ -431,29 +470,15 @@ impl Visualizer {
                         ),
                         {
                             let tx_stream_fault = tx_stream_fault.clone();
-                            let stream_error_window = Arc::clone(&stream_error_window);
-                            let stream_error_logs = Arc::clone(&stream_error_logs);
+                            let stream_errors = Arc::clone(&stream_errors);
                             move |err| {
                                 let err_text = err.to_string();
-                                let is_pollerr = err_text.contains("POLLERR");
-                                let error_key = if is_pollerr {
-                                    "pollerr".to_string()
-                                } else {
-                                    err_text.clone()
-                                };
-                                Self::log_stream_error_throttled(
-                                    &stream_error_logs,
-                                    &error_key,
-                                    &format!("audio input stream callback error: {}", err_text),
-                                );
-
-                                if is_pollerr
-                                    && Self::should_restart_after_stream_error(
-                                        &stream_error_window,
-                                        Instant::now(),
-                                    )
-                                {
-                                    let _ = tx_stream_fault.send(StreamFault::PollErrBurst);
+                                let kind = Self::classify_stream_error(&err, &err_text);
+                                if let Ok(mut telemetry) = stream_errors.lock() {
+                                    telemetry.record(kind);
+                                }
+                                if matches!(kind, StreamErrorKind::DeviceUnavailable) {
+                                    let _ = tx_stream_fault.send(StreamFault::DeviceUnavailable);
                                 }
                             }
                         },
@@ -505,22 +530,17 @@ impl Visualizer {
             let mut brightness = vec![0.0_f32; n];
             let mut prev_max = vec![0.0; n];
             let mut speed = vec![0.0; n];
-            let mut degraded_since: Option<Instant> = None;
             // Clear any colors left over from a previous Nanoleaf scene or effect
             self.send_black_frame(n);
             loop {
+                Self::report_stream_errors_if_due(&stream_errors, &self.stream_health);
                 if matches!(self.state, VisualizerState::Done) {
                     break;
                 }
-                Self::process_stream_faults(
-                    &rx_stream_fault,
-                    &mut degraded_since,
-                    &self.stream_health,
-                );
-                if Self::should_escalate_degraded_stream(degraded_since) {
+                if Self::process_stream_faults(&rx_stream_fault) {
                     Self::set_stream_health(&self.stream_health, StreamHealth::Restarting);
                     eprintln!(
-                        "WARNING: stream soft recovery timeout reached; escalating to visualizer restart."
+                        "WARNING: audio input device became unavailable; restarting visualizer."
                     );
                     return;
                 }
@@ -536,33 +556,25 @@ impl Visualizer {
                 let to_collect = ((sample_rate as f32) * self.time_window).round() as usize;
                 let mut samples = Vec::with_capacity(2 * to_collect);
                 while samples.len() < to_collect {
-                    Self::process_stream_faults(
-                        &rx_stream_fault,
-                        &mut degraded_since,
-                        &self.stream_health,
-                    );
-                    if Self::should_escalate_degraded_stream(degraded_since) {
+                    Self::report_stream_errors_if_due(&stream_errors, &self.stream_health);
+                    if Self::process_stream_faults(&rx_stream_fault) {
                         Self::set_stream_health(&self.stream_health, StreamHealth::Restarting);
                         eprintln!(
-                            "WARNING: stream soft recovery timeout reached; escalating to visualizer restart."
+                            "WARNING: audio input device became unavailable; restarting visualizer."
                         );
                         return;
                     }
                     let mut new_samples = match rx_audio.recv_timeout(AUDIO_RECV_TIMEOUT) {
                         Ok(samples) => samples,
                         Err(RecvTimeoutError::Timeout) => {
-                            Self::process_stream_faults(
-                                &rx_stream_fault,
-                                &mut degraded_since,
-                                &self.stream_health,
-                            );
-                            if Self::should_escalate_degraded_stream(degraded_since) {
+                            Self::report_stream_errors_if_due(&stream_errors, &self.stream_health);
+                            if Self::process_stream_faults(&rx_stream_fault) {
                                 Self::set_stream_health(
                                     &self.stream_health,
                                     StreamHealth::Restarting,
                                 );
                                 eprintln!(
-                                    "WARNING: stream soft recovery timeout reached; escalating to visualizer restart."
+                                    "WARNING: audio input device became unavailable; restarting visualizer."
                                 );
                                 return;
                             }
@@ -590,12 +602,6 @@ impl Visualizer {
                     };
                     samples.append(&mut new_samples);
                 }
-                if degraded_since.take().is_some() {
-                    Self::clear_stream_error_window(&stream_error_window);
-                    Self::set_stream_health(&self.stream_health, StreamHealth::Healthy);
-                    eprintln!("INFO: stream soft recovery succeeded; continuing visualizer.");
-                }
-                Self::set_stream_health(&self.stream_health, StreamHealth::Healthy);
                 let spectrum = processing::process(samples, self.gain);
                 let hz_per_bin = (sample_rate / 2) / (spectrum.len() as u32);
                 match self.effect {
