@@ -28,10 +28,34 @@ import {
 } from "@/components/ui/card";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
+import { cn } from "@/lib/utils";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 const DEFAULT_BRIGHTNESS_DRAFT = "50";
 const EFFECT_OPTIONS = ["Spectrum", "EnergyWave", "Pulse"] as const;
+
+const LS_SHOW_LIVE_PREVIEW = "audioleaf.show_live_preview";
+const LS_DRIVE_PALETTE = "audioleaf.drive_visualizer_palette";
+
+function readLocalBool(key: string, fallback: boolean): boolean {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = window.localStorage.getItem(key);
+    if (raw == null) return fallback;
+    return raw === "true";
+  } catch {
+    return fallback;
+  }
+}
+
+function writeLocalBool(key: string, value: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(key, String(value));
+  } catch {
+    // ignore — storage may be disabled or full
+  }
+}
 type EffectOption = (typeof EFFECT_OPTIONS)[number];
 
 function isValidBrightnessInput(value: string): boolean {
@@ -180,7 +204,9 @@ function App() {
     time_window: "0.2",
   });
   const [audioBackends, setAudioBackends] = useState<string[]>(["default"]);
-  const [showLivePreview, setShowLivePreview] = useState(false);
+  const [showLivePreview, setShowLivePreview] = useState(() =>
+    readLocalBool(LS_SHOW_LIVE_PREVIEW, false),
+  );
   const [livePreviewDeviceName, setLivePreviewDeviceName] = useState<string | null>(null);
   const [livePreviewColorsByPanel, setLivePreviewColorsByPanel] = useState<
     Record<number, [number, number, number]>
@@ -327,6 +353,25 @@ function App() {
       brightnessCommitTimersRef.current = {};
     };
   }, []);
+
+  useEffect(() => {
+    writeLocalBool(LS_SHOW_LIVE_PREVIEW, showLivePreview);
+  }, [showLivePreview]);
+
+  const nowPlayingPaletteRestoredRef = useRef(false);
+  useEffect(() => {
+    if (nowPlayingPaletteRestoredRef.current) return;
+    if (loadState !== "ready" || !nowPlaying) return;
+    nowPlayingPaletteRestoredRef.current = true;
+    const desired = readLocalBool(LS_DRIVE_PALETTE, false);
+    if (desired && !nowPlaying.drive_visualizer_palette) {
+      void handleNowPlayingDrivePaletteToggle(true);
+    }
+    // If the server already has it on, ensure localStorage reflects that.
+    if (nowPlaying.drive_visualizer_palette) {
+      writeLocalBool(LS_DRIVE_PALETTE, true);
+    }
+  }, [loadState, nowPlaying]);
 
   useEffect(() => {
     if (!showLivePreview) {
@@ -757,6 +802,7 @@ function App() {
         drive_visualizer_palette: enabled,
       });
       setNowPlaying(updated);
+      writeLocalBool(LS_DRIVE_PALETTE, enabled);
       setActionMessage(
         enabled
           ? "Now playing palette mode enabled."
@@ -860,6 +906,114 @@ function App() {
         </Card>
       ) : null}
 
+      <section className="mb-6">
+        <Card
+          className={cn(
+            "border-primary/30 shadow-card",
+            nowPlaying?.drive_visualizer_palette &&
+              nowPlaying?.palette_colors.length &&
+              "border-primary ring-2 ring-primary/40",
+          )}
+        >
+          <CardContent className="p-6">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+              <div className="flex flex-wrap items-center gap-2">
+                <p className="text-xs uppercase tracking-[0.2em] text-muted-foreground">
+                  Now Playing
+                </p>
+                <Badge variant={nowPlaying?.reader_running ? "default" : "secondary"}>
+                  {nowPlaying?.reader_running ? "Reader Running" : "Reader Waiting"}
+                </Badge>
+                {nowPlaying?.drive_visualizer_palette &&
+                nowPlaying?.palette_colors.length ? (
+                  <Badge className="bg-primary text-primary-foreground">
+                    Visualizer palette: artwork
+                  </Badge>
+                ) : null}
+              </div>
+              <label className="inline-flex items-center gap-3 text-sm text-muted-foreground">
+                <Switch
+                  checked={nowPlaying?.drive_visualizer_palette ?? false}
+                  onChange={(event) =>
+                    void handleNowPlayingDrivePaletteToggle(event.currentTarget.checked)
+                  }
+                  disabled={!nowPlaying}
+                />
+                Use artwork colors
+              </label>
+            </div>
+
+            {nowPlaying?.last_error ? (
+              <p className="mb-4 rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
+                {nowPlaying.last_error}
+              </p>
+            ) : null}
+
+            <div className="flex flex-col items-center gap-4">
+              <div className="overflow-hidden rounded-lg border border-border/70 bg-background/70 shadow-md">
+                {nowPlaying?.artwork_available ? (
+                  <img
+                    src={apiAssetUrl(
+                      `/api/now-playing/artwork?g=${nowPlaying.artwork_generation}`,
+                    )}
+                    alt="Album artwork"
+                    className="h-[280px] w-[280px] object-cover"
+                  />
+                ) : (
+                  <div className="flex h-[280px] w-[280px] items-center justify-center px-4 text-center text-xs text-muted-foreground">
+                    No artwork available yet
+                  </div>
+                )}
+              </div>
+              <div className="max-w-xl text-center">
+                <p className="font-display text-2xl font-semibold text-foreground">
+                  {nowPlaying?.track?.title ?? "No active track"}
+                </p>
+                {nowPlaying?.track?.artist ? (
+                  <p className="mt-1 text-base text-muted-foreground">
+                    {nowPlaying.track.artist}
+                  </p>
+                ) : null}
+                {nowPlaying?.track?.album ? (
+                  <p className="mt-0.5 text-sm text-muted-foreground/80">
+                    {nowPlaying.track.album}
+                  </p>
+                ) : null}
+                {nowPlaying?.track?.source_name || nowPlaying?.track?.source_ip ? (
+                  <p className="mt-2 text-xs uppercase tracking-[0.15em] text-muted-foreground/70">
+                    via {nowPlaying.track.source_name ?? nowPlaying.track.source_ip}
+                  </p>
+                ) : null}
+              </div>
+
+              {nowPlaying?.palette_colors.length ? (
+                <div className="flex flex-col items-center gap-2">
+                  <p className="text-xs uppercase tracking-[0.15em] text-muted-foreground">
+                    {nowPlaying.drive_visualizer_palette
+                      ? "Active artwork palette"
+                      : "Artwork palette (inactive)"}
+                  </p>
+                  <div className="flex flex-wrap items-center justify-center gap-1.5">
+                    {nowPlaying.palette_colors.map(([r, g, b], idx) => (
+                      <span
+                        key={`now-playing-color-${idx}`}
+                        className={cn(
+                          "h-8 w-10 rounded-sm border border-border/70 transition-shadow",
+                          nowPlaying.drive_visualizer_palette &&
+                            "shadow-[0_0_0_2px_hsl(var(--primary)/0.6)]",
+                        )}
+                        style={{ backgroundColor: `rgb(${r}, ${g}, ${b})` }}
+                        title={`rgb(${r}, ${g}, ${b})`}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          </CardContent>
+        </Card>
+      </section>
+
       <section className="grid gap-6 lg:grid-cols-3">
         <Card>
           <CardHeader>
@@ -916,62 +1070,27 @@ function App() {
           <CardContent>
             {visualizerConfig ? (
               <div className="space-y-4">
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <SettingCell
-                    label="Audio backend"
-                    value={visualizerConfig.audio_backend ?? "default"}
-                  />
-                  <SettingCell
-                    label="Frequency range"
-                    value={
-                      visualizerConfig.freq_range
-                        ? `${visualizerConfig.freq_range[0]}-${visualizerConfig.freq_range[1]} Hz`
-                        : "-"
-                    }
-                  />
-                  <SettingCell
-                    label="Default gain"
-                    value={
-                      visualizerConfig.default_gain !== null
-                        ? String(visualizerConfig.default_gain)
-                        : "-"
-                    }
-                  />
-                  <SettingCell
-                    label="Transition time"
-                    value={
-                      visualizerConfig.transition_time !== null
-                        ? `${formatTenths(visualizerConfig.transition_time / 10)}s`
-                        : "-"
-                    }
-                  />
-                  <SettingCell
-                    label="Time window"
-                    value={
-                      visualizerConfig.time_window !== null
-                        ? `${formatTenths(visualizerConfig.time_window)}s`
-                        : "-"
-                    }
-                  />
-                  <SettingCell
-                    label="Effect"
-                    value={visualizerConfig.effect ?? "Spectrum"}
-                  />
-                  <SettingCell
-                    label="Primary axis"
-                    value={visualizerConfig.primary_axis ?? "Y"}
-                  />
-                  <SettingCell
-                    label="Sort (primary / secondary)"
-                    value={`${visualizerConfig.sort_primary ?? "Asc"} / ${visualizerConfig.sort_secondary ?? "Asc"}`}
-                  />
-                </div>
                 <div>
-                  <p className="mb-2 text-xs uppercase tracking-[0.15em] text-muted-foreground">
-                    Configured Colors
-                  </p>
+                  <div className="mb-2 flex flex-wrap items-center gap-2">
+                    <p className="text-xs uppercase tracking-[0.15em] text-muted-foreground">
+                      Configured Colors
+                    </p>
+                    {nowPlaying?.drive_visualizer_palette &&
+                    nowPlaying.palette_colors.length ? (
+                      <Badge className="bg-primary/15 text-primary">
+                        Overridden by artwork palette
+                      </Badge>
+                    ) : null}
+                  </div>
                   {visualizerConfig.colors?.length ? (
-                    <div className="flex flex-wrap items-center gap-1.5">
+                    <div
+                      className={cn(
+                        "flex flex-wrap items-center gap-1.5",
+                        nowPlaying?.drive_visualizer_palette &&
+                          nowPlaying.palette_colors.length &&
+                          "opacity-40",
+                      )}
+                    >
                       {visualizerConfig.colors.map(([r, g, b], idx) => (
                         <span
                           key={`config-color-${idx}`}
@@ -1207,93 +1326,6 @@ function App() {
                 Visualizer config not found in your config file.
               </p>
             )}
-          </CardContent>
-        </Card>
-
-        <Card className="lg:col-span-3">
-          <CardHeader>
-            <CardTitle>Now Playing (AirPlay Metadata)</CardTitle>
-            <CardDescription>
-              Track and artwork data from Shairport metadata pipe{" "}
-              <code>
-                {nowPlaying?.metadata_pipe_path ?? "/tmp/shairport-sync-metadata"}
-              </code>
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex flex-wrap items-center gap-3">
-              <Badge variant={nowPlaying?.reader_running ? "default" : "secondary"}>
-                {nowPlaying?.reader_running ? "Reader Running" : "Reader Waiting"}
-              </Badge>
-              <label className="inline-flex items-center gap-3 text-sm text-muted-foreground">
-                <Switch
-                  checked={nowPlaying?.drive_visualizer_palette ?? false}
-                  onChange={(event) =>
-                    void handleNowPlayingDrivePaletteToggle(event.currentTarget.checked)
-                  }
-                  disabled={!nowPlaying}
-                />
-                Drive visualizer palette from artwork colors
-              </label>
-            </div>
-
-            {nowPlaying?.last_error ? (
-              <p className="rounded-md border border-destructive/30 bg-destructive/5 p-3 text-xs text-destructive">
-                {nowPlaying.last_error}
-              </p>
-            ) : null}
-
-            <div className="grid gap-4 lg:grid-cols-[180px_1fr]">
-              <div className="overflow-hidden rounded-md border border-border/70 bg-background/70">
-                {nowPlaying?.artwork_available ? (
-                  <img
-                    src={apiAssetUrl(
-                      `/api/now-playing/artwork?g=${nowPlaying.artwork_generation}`,
-                    )}
-                    alt="Album artwork"
-                    className="h-[180px] w-full object-cover"
-                  />
-                ) : (
-                  <div className="flex h-[180px] items-center justify-center px-3 text-center text-xs text-muted-foreground">
-                    No artwork available yet
-                  </div>
-                )}
-              </div>
-              <div className="grid gap-2 text-sm sm:grid-cols-2">
-                <SettingCell
-                  label="Title"
-                  value={nowPlaying?.track?.title ?? "No active track"}
-                />
-                <SettingCell label="Artist" value={nowPlaying?.track?.artist ?? "-"} />
-                <SettingCell label="Album" value={nowPlaying?.track?.album ?? "-"} />
-                <SettingCell
-                  label="Source"
-                  value={nowPlaying?.track?.source_name ?? nowPlaying?.track?.source_ip ?? "-"}
-                />
-              </div>
-            </div>
-
-            <div>
-              <p className="mb-2 text-xs uppercase tracking-[0.12em] text-muted-foreground">
-                Extracted Artwork Colors
-              </p>
-              {nowPlaying?.palette_colors.length ? (
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {nowPlaying.palette_colors.map(([r, g, b], idx) => (
-                    <span
-                      key={`now-playing-color-${idx}`}
-                      className="h-8 w-10 rounded-sm border border-border/70"
-                      style={{ backgroundColor: `rgb(${r}, ${g}, ${b})` }}
-                      title={`rgb(${r}, ${g}, ${b})`}
-                    />
-                  ))}
-                </div>
-              ) : (
-                <p className="text-sm text-muted-foreground">
-                  Artwork palette unavailable. Start playback through Shairport Sync.
-                </p>
-              )}
-            </div>
           </CardContent>
         </Card>
 
