@@ -433,12 +433,10 @@ async fn main() -> Result<()> {
     } else {
         println!("Live visualizer initialized.");
     }
-    start_now_playing_reader(&state);
+    // TEMPORARY: metadata reader disabled to isolate tokio-freeze cause
+    // start_now_playing_reader(&state);
     start_live_visualizer_watchdog(&state);
-    println!(
-        "Now-playing metadata reader initialized (pipe: {}).",
-        metadata_pipe_path
-    );
+    eprintln!("DEBUG: metadata reader DISABLED for diagnosis; pipe: {metadata_pipe_path}");
 
     eprintln!("DEBUG: about to spawn heartbeat task");
     tokio::spawn(async {
