@@ -1597,9 +1597,24 @@ function DeviceLayoutViewer({
         className="h-auto w-full rounded-md border border-border/70 bg-background"
         role="img"
         aria-label={`Panel layout for ${layout.device.name}`}
+        shapeRendering="geometricPrecision"
       >
+        <defs>
+          <filter id="panelShadow" x="-20%" y="-20%" width="140%" height="140%">
+            <feDropShadow
+              dx="0"
+              dy="1.5"
+              stdDeviation="1.5"
+              floodColor="#000"
+              floodOpacity="0.35"
+            />
+          </filter>
+        </defs>
         {lightPanels.map((panel) => (
-          <g key={`${panel.panel_id}-${panel.x}-${panel.y}`}>
+          <g
+            key={`${panel.panel_id}-${panel.x}-${panel.y}`}
+            filter="url(#panelShadow)"
+          >
             <polygon
               points={buildPanelPolygonPoints(panel)}
               fill={
@@ -1607,8 +1622,9 @@ function DeviceLayoutViewer({
                   ? panelFillColor(panel, livePreviewColorsByPanel[panel.panel_id])
                   : panelFillColor(panel)
               }
-              stroke="hsl(var(--foreground) / 0.55)"
-              strokeWidth={1.3}
+              stroke="hsl(var(--foreground) / 0.85)"
+              strokeWidth={1.25}
+              strokeLinejoin="round"
             />
             <title>
               Panel {panel.panel_id} • {panel.shape_type_name}
@@ -1616,12 +1632,16 @@ function DeviceLayoutViewer({
           </g>
         ))}
         {controllerPanels.map((panel) => (
-          <g key={`${panel.panel_id}-${panel.x}-${panel.y}-controller`}>
+          <g
+            key={`${panel.panel_id}-${panel.x}-${panel.y}-controller`}
+            filter="url(#panelShadow)"
+          >
             <polygon
               points={buildControllerTrapezoidPoints(panel, lightPanels)}
               fill={panelFillColor(panel)}
-              stroke="hsl(var(--foreground) / 0.65)"
-              strokeWidth={1.3}
+              stroke="hsl(var(--foreground) / 0.9)"
+              strokeWidth={1.25}
+              strokeLinejoin="round"
             />
             <title>Controller</title>
           </g>
@@ -1652,6 +1672,9 @@ function panelBaseRadius(panel: DeviceLayoutPanel): number {
   return Math.max(panel.side_length * 0.65, 20);
 }
 
+const PANEL_OFF_FILL = "hsl(0 0% 96% / 0.92)";
+const PANEL_LIVE_DARK_THRESHOLD = 18;
+
 function panelFillColor(
   panel: DeviceLayoutPanel,
   liveRgb?: [number, number, number],
@@ -1660,9 +1683,13 @@ function panelFillColor(
     return "hsl(var(--accent) / 0.95)";
   }
   if (liveRgb) {
-    return `rgb(${liveRgb[0]}, ${liveRgb[1]}, ${liveRgb[2]})`;
+    const [r, g, b] = liveRgb;
+    if (Math.max(r, g, b) < PANEL_LIVE_DARK_THRESHOLD) {
+      return PANEL_OFF_FILL;
+    }
+    return `rgb(${r}, ${g}, ${b})`;
   }
-  return "hsl(0 0% 96% / 0.92)";
+  return PANEL_OFF_FILL;
 }
 
 function buildPanelPolygonPoints(panel: {
