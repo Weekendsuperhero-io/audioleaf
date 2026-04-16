@@ -232,9 +232,6 @@ fn select_input_stream_profile(
 
 fn should_prefer_loopback_profile(device: &Device, requested_name: &str) -> bool {
     let normalized = requested_name.to_ascii_lowercase();
-    if normalized == constants::DEFAULT_AUDIO_BACKEND {
-        return false;
-    }
 
     if normalized.contains("loopback") || normalized.contains("aloop") {
         return true;
