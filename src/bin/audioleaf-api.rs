@@ -440,6 +440,15 @@ async fn main() -> Result<()> {
         metadata_pipe_path
     );
 
+    tokio::spawn(async {
+        let mut count: u64 = 0;
+        loop {
+            tokio::time::sleep(Duration::from_secs(5)).await;
+            count += 1;
+            eprintln!("DEBUG: tokio heartbeat #{count}");
+        }
+    });
+
     let app = Router::new()
         .route("/api/health", get(get_health))
         .route("/api/config", get(get_config))
