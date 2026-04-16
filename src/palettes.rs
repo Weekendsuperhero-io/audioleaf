@@ -4,7 +4,7 @@
 /// in their config.toml instead of manually specifying RGB color arrays.
 /// Each color is an [R, G, B] triplet. At runtime these are converted
 /// to Oklch so the visualizer can animate perceptually-uniform lightness.
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 /// Get a predefined palette by name
 pub fn get_palette(name: &str) -> Option<Vec<[u8; 3]>> {

@@ -9,14 +9,15 @@ use axum::{
 };
 use base64::Engine;
 use clap::Parser;
+use hashbrown::HashMap;
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::HashMap,
     fs::OpenOptions,
     io::{BufRead, BufReader},
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, Mutex, mpsc::Sender},
+    sync::{Arc, mpsc::Sender},
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -710,10 +711,7 @@ async fn get_now_playing_artwork(
     State(state): State<ApiState>,
 ) -> std::result::Result<Response, ApiError> {
     let (bytes, mime_type) = {
-        let guard = state
-            .now_playing
-            .lock()
-            .map_err(|_| ApiError::internal("Now-playing state lock poisoned"))?;
+        let guard = state.now_playing.lock();
         let Some(bytes) = guard.artwork_bytes.clone() else {
             return Err(ApiError::not_found("No album artwork available yet."));
         };
@@ -748,10 +746,7 @@ async fn put_now_playing_settings(
     }
 
     let maybe_palette_to_apply = {
-        let mut guard = state
-            .now_playing
-            .lock()
-            .map_err(|_| ApiError::internal("Now-playing state lock poisoned"))?;
+        let mut guard = state.now_playing.lock();
         if let Some(enabled) = payload.drive_visualizer_palette {
             guard.drive_visualizer_palette = enabled;
         }
@@ -935,10 +930,7 @@ async fn get_visualizer_preview(
         }));
     };
 
-    let colors_map = runtime
-        .shared_colors
-        .lock()
-        .map_err(|_| ApiError::internal("Live preview color state lock poisoned"))?;
+    let colors_map = runtime.shared_colors.lock();
     let mut panel_colors: Vec<VisualizerPreviewPanelColor> = colors_map
         .iter()
         .map(|(panel_id, rgb)| VisualizerPreviewPanelColor {
@@ -962,19 +954,12 @@ async fn get_visualizer_status(
     let live_visualizer_attached = live.is_some();
     let device = live.as_ref().map(|runtime| runtime.device.clone());
     let stream_health = match live {
-        Some(runtime) => runtime
-            .stream_health
-            .lock()
-            .map(|guard| *guard)
-            .unwrap_or(audioleaf::visualizer::StreamHealth::Restarting),
+        Some(runtime) => *runtime.stream_health.lock(),
         None => audioleaf::visualizer::StreamHealth::Restarting,
     };
 
     let restart_cooldown_active = live_visualizer_restart_cooldown_remaining(&state)?.is_some();
-    let recovery = state
-        .live_visualizer_recovery
-        .lock()
-        .map_err(|_| ApiError::internal("Live visualizer recovery state lock poisoned"))?;
+    let recovery = state.live_visualizer_recovery.lock();
     let current_audio_backend = get_runtime_config_clone(&state)?
         .visualizer_config
         .audio_backend;
@@ -999,10 +984,7 @@ async fn get_visualizer_status(
 }
 
 fn current_now_playing_snapshot(state: &ApiState) -> Result<NowPlayingResponse, ApiError> {
-    let guard = state
-        .now_playing
-        .lock()
-        .map_err(|_| ApiError::internal("Now-playing state lock poisoned"))?;
+    let guard = state.now_playing.lock();
     Ok(guard.snapshot())
 }
 
@@ -1010,46 +992,36 @@ fn start_now_playing_reader(state: &ApiState) {
     let state = state.clone();
     thread::spawn(move || {
         loop {
-            let metadata_pipe_path = match state.now_playing.lock() {
-                Ok(guard) => guard.metadata_pipe_path.clone(),
-                Err(_) => {
-                    eprintln!("WARNING: now-playing state lock poisoned; retrying.");
-                    thread::sleep(NOW_PLAYING_RETRY_DELAY);
-                    continue;
-                }
-            };
+            let metadata_pipe_path = state.now_playing.lock().metadata_pipe_path.clone();
 
             match OpenOptions::new().read(true).open(&metadata_pipe_path) {
                 Ok(file) => {
-                    if let Ok(mut guard) = state.now_playing.lock() {
-                        guard.reader_running = true;
-                        guard.last_error = None;
-                        guard.updated_at_ms = Some(now_unix_ms());
-                    }
+                    let mut guard = state.now_playing.lock();
+                    guard.reader_running = true;
+                    guard.last_error = None;
+                    guard.updated_at_ms = Some(now_unix_ms());
 
                     let mut reader = BufReader::new(file);
                     let result = process_shairport_metadata_stream(&state, &mut reader);
 
-                    if let Ok(mut guard) = state.now_playing.lock() {
-                        guard.reader_running = false;
-                        guard.updated_at_ms = Some(now_unix_ms());
-                        if let Err(err) = &result {
-                            guard.last_error = Some(err.clone());
-                        }
+                    let mut guard = state.now_playing.lock();
+                    guard.reader_running = false;
+                    guard.updated_at_ms = Some(now_unix_ms());
+                    if let Err(err) = &result {
+                        guard.last_error = Some(err.clone());
                     }
                     if let Err(err) = result {
                         eprintln!("WARNING: metadata stream error: {}", err);
                     }
                 }
                 Err(err) => {
-                    if let Ok(mut guard) = state.now_playing.lock() {
-                        guard.reader_running = false;
-                        guard.last_error = Some(format!(
-                            "Failed to open metadata pipe '{}': {}",
-                            metadata_pipe_path, err
-                        ));
-                        guard.updated_at_ms = Some(now_unix_ms());
-                    }
+                    let mut guard = state.now_playing.lock();
+                    guard.reader_running = false;
+                    guard.last_error = Some(format!(
+                        "Failed to open metadata pipe '{}': {}",
+                        metadata_pipe_path, err
+                    ));
+                    guard.updated_at_ms = Some(now_unix_ms());
                 }
             }
 
@@ -1162,36 +1134,81 @@ fn read_metadata_payload<R: BufRead>(
     reader: &mut R,
     payload_len: usize,
 ) -> std::result::Result<Vec<u8>, String> {
-    let mut separator = String::new();
-    let separator_read = reader
-        .read_line(&mut separator)
-        .map_err(|err| format!("Failed to read payload separator: {}", err))?;
-    if separator_read == 0 {
+    let mut first_line = String::new();
+    let first_read = reader
+        .read_line(&mut first_line)
+        .map_err(|err| format!("Failed to read payload line: {}", err))?;
+    if first_read == 0 {
         return Err("Unexpected EOF before payload.".to_string());
     }
 
-    let base64_line = if separator.trim().is_empty() {
-        let mut line = String::new();
-        let payload_read = reader
-            .read_line(&mut line)
-            .map_err(|err| format!("Failed to read base64 payload: {}", err))?;
-        if payload_read == 0 {
+    let mut payload_line = first_line.trim().to_string();
+    if payload_line.is_empty() {
+        let mut second_line = String::new();
+        let second_read = reader
+            .read_line(&mut second_line)
+            .map_err(|err| format!("Failed to read payload line: {}", err))?;
+        if second_read == 0 {
             return Err("Unexpected EOF while reading payload.".to_string());
         }
-        line
-    } else {
-        separator
-    };
+        payload_line = second_line.trim().to_string();
+    }
+
+    // shairport-sync-metadata-reader may wrap base64 payloads as:
+    // <data encoding="base64">
+    // ...
+    // </data>
+    if payload_line.starts_with("<data") {
+        let mut encoded = String::new();
+        if let Some((_, after_gt)) = payload_line.split_once('>')
+            && let Some((inline, _)) = after_gt.split_once("</data>")
+        {
+            encoded.push_str(inline.trim());
+        }
+
+        while encoded.is_empty() {
+            let mut line = String::new();
+            let read = reader
+                .read_line(&mut line)
+                .map_err(|err| format!("Failed to read wrapped payload: {}", err))?;
+            if read == 0 {
+                return Err("Unexpected EOF while reading wrapped payload.".to_string());
+            }
+
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with("</data") {
+                break;
+            }
+            if trimmed.starts_with('<') {
+                continue;
+            }
+            encoded.push_str(trimmed);
+        }
+
+        let mut decoded = base64::engine::general_purpose::STANDARD
+            .decode(encoded.trim())
+            .unwrap_or_default();
+        if decoded.len() > payload_len {
+            decoded.truncate(payload_len);
+        }
+        return Ok(decoded);
+    }
+
+    // If we encounter an unexpected XML tag, skip this payload item silently.
+    // Returning an error here causes noisy log spam and desync churn.
+    if payload_line.starts_with('<') {
+        return Ok(Vec::new());
+    }
 
     let mut decoded = base64::engine::general_purpose::STANDARD
-        .decode(base64_line.trim())
-        .map_err(|err| format!("Failed to decode base64 payload: {}", err))?;
+        .decode(payload_line.trim())
+        .unwrap_or_else(|_| payload_line.as_bytes().to_vec());
     if decoded.len() > payload_len {
         decoded.truncate(payload_len);
     }
-
-    let mut trailing_line = String::new();
-    let _ = reader.read_line(&mut trailing_line);
     Ok(decoded)
 }
 
@@ -1199,46 +1216,45 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
     let payload_text = payload_bytes_to_string(&payload);
     let mut maybe_palette_to_apply: Option<Vec<[u8; 3]>> = None;
 
-    if let Ok(mut guard) = state.now_playing.lock() {
-        guard.reader_running = true;
-        guard.last_error = None;
-        guard.updated_at_ms = Some(now_unix_ms());
+    let mut guard = state.now_playing.lock();
+    guard.reader_running = true;
+    guard.last_error = None;
+    guard.updated_at_ms = Some(now_unix_ms());
 
-        if item_type == "core" {
-            if code.eq_ignore_ascii_case("minm") {
-                guard.track.title = payload_text;
-            } else if code.eq_ignore_ascii_case("asar") {
-                guard.track.artist = payload_text;
-            } else if code.eq_ignore_ascii_case("asal") {
-                guard.track.album = payload_text;
-            } else if code.eq_ignore_ascii_case("asul") {
-                guard.track.stream_url = payload_text;
-            }
-        } else if item_type == "ssnc" {
-            if code.eq_ignore_ascii_case("snam") {
-                guard.track.source_name = payload_text;
-            } else if code.eq_ignore_ascii_case("snua") {
-                guard.track.user_agent = payload_text;
-            } else if code.eq_ignore_ascii_case("clip") || code.eq_ignore_ascii_case("conn") {
-                guard.track.source_ip = payload_text;
-            } else if code.eq_ignore_ascii_case("PICT") {
-                if !payload.is_empty() {
-                    let colors = extract_prominent_colors(&payload).unwrap_or_default();
-                    guard.artwork_mime_type = detect_image_mime_type(&payload).map(str::to_string);
-                    guard.artwork_bytes = Some(payload);
-                    guard.artwork_generation = guard.artwork_generation.saturating_add(1);
-                    guard.palette_colors = colors.clone();
-                    if guard.drive_visualizer_palette && !colors.is_empty() {
-                        maybe_palette_to_apply = Some(colors);
-                    }
+    if item_type == "core" {
+        if code.eq_ignore_ascii_case("minm") {
+            guard.track.title = payload_text;
+        } else if code.eq_ignore_ascii_case("asar") {
+            guard.track.artist = payload_text;
+        } else if code.eq_ignore_ascii_case("asal") {
+            guard.track.album = payload_text;
+        } else if code.eq_ignore_ascii_case("asul") {
+            guard.track.stream_url = payload_text;
+        }
+    } else if item_type == "ssnc" {
+        if code.eq_ignore_ascii_case("snam") {
+            guard.track.source_name = payload_text;
+        } else if code.eq_ignore_ascii_case("snua") {
+            guard.track.user_agent = payload_text;
+        } else if code.eq_ignore_ascii_case("clip") || code.eq_ignore_ascii_case("conn") {
+            guard.track.source_ip = payload_text;
+        } else if code.eq_ignore_ascii_case("PICT") {
+            if !payload.is_empty() {
+                let colors = extract_prominent_colors(&payload).unwrap_or_default();
+                guard.artwork_mime_type = detect_image_mime_type(&payload).map(str::to_string);
+                guard.artwork_bytes = Some(payload);
+                guard.artwork_generation = guard.artwork_generation.saturating_add(1);
+                guard.palette_colors = colors.clone();
+                if guard.drive_visualizer_palette && !colors.is_empty() {
+                    maybe_palette_to_apply = Some(colors);
                 }
-            } else if code.eq_ignore_ascii_case("pbeg")
-                || code.eq_ignore_ascii_case("pend")
-                || code.eq_ignore_ascii_case("pfls")
-                || code.eq_ignore_ascii_case("disc")
-            {
-                guard.clear_session_data();
             }
+        } else if code.eq_ignore_ascii_case("pbeg")
+            || code.eq_ignore_ascii_case("pend")
+            || code.eq_ignore_ascii_case("pfls")
+            || code.eq_ignore_ascii_case("disc")
+        {
+            guard.clear_session_data();
         }
     }
 
@@ -1377,10 +1393,7 @@ fn load_device_by_name(
 }
 
 fn get_runtime_config_clone(state: &ApiState) -> Result<audioleaf::config::Config, ApiError> {
-    let guard = state
-        .runtime_config
-        .lock()
-        .map_err(|_| ApiError::internal("Runtime config lock poisoned"))?;
+    let guard = state.runtime_config.lock();
     Ok(guard.clone())
 }
 
@@ -1391,19 +1404,13 @@ fn update_runtime_config<F>(
 where
     F: FnOnce(&mut audioleaf::config::Config),
 {
-    let mut guard = state
-        .runtime_config
-        .lock()
-        .map_err(|_| ApiError::internal("Runtime config lock poisoned"))?;
+    let mut guard = state.runtime_config.lock();
     updater(&mut guard);
     Ok(guard.clone())
 }
 
 fn current_live_visualizer(state: &ApiState) -> Result<Option<LiveVisualizerRuntime>, ApiError> {
-    let guard = state
-        .live_visualizer
-        .lock()
-        .map_err(|_| ApiError::internal("Live visualizer state lock poisoned"))?;
+    let guard = state.live_visualizer.lock();
     Ok(guard.clone())
 }
 
@@ -1421,10 +1428,7 @@ fn mark_live_visualizer_recovery_success(
     state: &ApiState,
     auto_fallback_to_default_active: bool,
 ) -> Result<(), ApiError> {
-    let mut guard = state
-        .live_visualizer_recovery
-        .lock()
-        .map_err(|_| ApiError::internal("Live visualizer recovery state lock poisoned"))?;
+    let mut guard = state.live_visualizer_recovery.lock();
     guard.auto_fallback_to_default_active = auto_fallback_to_default_active;
     guard.last_restart_at_ms = Some(now_unix_ms());
     guard.healthy_ping_streak = 0;
@@ -1432,30 +1436,21 @@ fn mark_live_visualizer_recovery_success(
 }
 
 fn mark_live_visualizer_recovery_failure(state: &ApiState) -> Result<u32, ApiError> {
-    let mut guard = state
-        .live_visualizer_recovery
-        .lock()
-        .map_err(|_| ApiError::internal("Live visualizer recovery state lock poisoned"))?;
+    let mut guard = state.live_visualizer_recovery.lock();
     guard.consecutive_restart_failures = guard.consecutive_restart_failures.saturating_add(1);
     guard.healthy_ping_streak = 0;
     Ok(guard.consecutive_restart_failures)
 }
 
 fn mark_live_visualizer_restart_attempt(state: &ApiState) -> Result<(), ApiError> {
-    let mut guard = state
-        .live_visualizer_recovery
-        .lock()
-        .map_err(|_| ApiError::internal("Live visualizer recovery state lock poisoned"))?;
+    let mut guard = state.live_visualizer_recovery.lock();
     guard.last_restart_at_ms = Some(now_unix_ms());
     guard.healthy_ping_streak = 0;
     Ok(())
 }
 
 fn mark_live_visualizer_watchdog_healthy(state: &ApiState) -> Result<(), ApiError> {
-    let mut guard = state
-        .live_visualizer_recovery
-        .lock()
-        .map_err(|_| ApiError::internal("Live visualizer recovery state lock poisoned"))?;
+    let mut guard = state.live_visualizer_recovery.lock();
 
     if guard.consecutive_restart_failures == 0 {
         guard.healthy_ping_streak = 0;
@@ -1477,10 +1472,7 @@ fn mark_live_visualizer_watchdog_healthy(state: &ApiState) -> Result<(), ApiErro
 fn live_visualizer_restart_cooldown_remaining(
     state: &ApiState,
 ) -> Result<Option<Duration>, ApiError> {
-    let guard = state
-        .live_visualizer_recovery
-        .lock()
-        .map_err(|_| ApiError::internal("Live visualizer recovery state lock poisoned"))?;
+    let guard = state.live_visualizer_recovery.lock();
 
     let Some(last_restart_at_ms) = guard.last_restart_at_ms else {
         return Ok(None);
@@ -1568,10 +1560,7 @@ async fn restart_live_visualizer(state: &ApiState) -> Result<(), ApiError> {
 fn restart_live_visualizer_sync(state: &ApiState) -> Result<(), ApiError> {
     let new_runtime = build_live_visualizer(state)?;
     let old_runtime = {
-        let mut guard = state
-            .live_visualizer
-            .lock()
-            .map_err(|_| ApiError::internal("Live visualizer state lock poisoned"))?;
+        let mut guard = state.live_visualizer.lock();
         guard.replace(new_runtime)
     };
 

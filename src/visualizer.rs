@@ -8,11 +8,12 @@ use crate::{
 use anyhow::Result;
 use cpal::{InputCallbackInfo, SampleFormat, SizedSample, StreamError, traits::*};
 use dasp_sample::conv::ToSample;
+use hashbrown::HashMap;
 use palette::{FromColor, Oklch, Srgb};
+use parking_lot::Mutex;
 use std::{
-    collections::HashMap,
     sync::{
-        Arc, Mutex,
+        Arc,
         mpsc::{self, RecvTimeoutError, TryRecvError},
     },
     thread,
@@ -374,11 +375,11 @@ impl Visualizer {
     }
 
     fn set_stream_health(stream_health: &Option<Arc<Mutex<StreamHealth>>>, next: StreamHealth) {
-        if let Some(shared) = stream_health
-            && let Ok(mut guard) = shared.lock()
-            && *guard != next
-        {
-            *guard = next;
+        if let Some(shared) = stream_health {
+            let mut guard = shared.lock();
+            if *guard != next {
+                *guard = next;
+            }
         }
     }
 
@@ -387,10 +388,7 @@ impl Visualizer {
         stream_health: &Option<Arc<Mutex<StreamHealth>>>,
     ) {
         let report = {
-            let mut guard = match stream_errors.lock() {
-                Ok(guard) => guard,
-                Err(_) => return,
-            };
+            let mut guard = stream_errors.lock();
             guard.take_report_if_due(Instant::now())
         };
 
@@ -474,9 +472,8 @@ impl Visualizer {
                             move |err| {
                                 let err_text = err.to_string();
                                 let kind = Self::classify_stream_error(&err, &err_text);
-                                if let Ok(mut telemetry) = stream_errors.lock() {
-                                    telemetry.record(kind);
-                                }
+                                let mut telemetry = stream_errors.lock();
+                                telemetry.record(kind);
                                 if matches!(kind, StreamErrorKind::DeviceUnavailable) {
                                     let _ = tx_stream_fault.send(StreamFault::DeviceUnavailable);
                                 }
@@ -653,15 +650,14 @@ impl Visualizer {
                 // Share display colors with the graphical UI for panel preview
                 // Clamp to sRGB gamut before converting to u8 to avoid
                 // wrap-around artifacts from out-of-gamut Oklch values
-                if let Ok(mut map) = self.shared_colors.lock() {
-                    map.clear();
-                    for (i, color) in display_colors.iter().enumerate() {
-                        let srgb: Srgb<f32> = Srgb::from_color(*color);
-                        let r = (srgb.red.clamp(0.0, 1.0) * 255.0) as u8;
-                        let g = (srgb.green.clamp(0.0, 1.0) * 255.0) as u8;
-                        let b = (srgb.blue.clamp(0.0, 1.0) * 255.0) as u8;
-                        map.insert(self.nl_udp.panels[i].id, [r, g, b]);
-                    }
+                let mut map = self.shared_colors.lock();
+                map.clear();
+                for (i, color) in display_colors.iter().enumerate() {
+                    let srgb: Srgb<f32> = Srgb::from_color(*color);
+                    let r = (srgb.red.clamp(0.0, 1.0) * 255.0) as u8;
+                    let g = (srgb.green.clamp(0.0, 1.0) * 255.0) as u8;
+                    let b = (srgb.blue.clamp(0.0, 1.0) * 255.0) as u8;
+                    map.insert(self.nl_udp.panels[i].id, [r, g, b]);
                 }
             }
             Self::set_stream_health(&self.stream_health, StreamHealth::Stopped);

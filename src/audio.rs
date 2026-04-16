@@ -1,7 +1,7 @@
 use crate::constants;
 use anyhow::{Result, bail};
 use cpal::{Device, SampleFormat, StreamConfig, traits::*};
-use std::collections::HashMap;
+use hashbrown::HashMap;
 
 pub struct AudioStream {
     pub device: Device,

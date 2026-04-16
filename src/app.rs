@@ -7,11 +7,12 @@ use crate::{
     nanoleaf::NlDevice,
 };
 use anyhow::Result;
+use hashbrown::HashMap;
 use macroquad::prelude::*;
-use std::collections::HashMap;
+use parking_lot::Mutex;
 use std::f32::consts::PI;
 use std::sync::{
-    Arc, Mutex,
+    Arc,
     atomic::{AtomicBool, Ordering},
     mpsc,
 };
@@ -360,9 +361,8 @@ impl App {
 
         // Snapshot visualization colors with smooth interpolation
         let vis_colors = if self.show_visualization {
-            if let Ok(map) = self.shared_colors.lock()
-                && *map != self.target_colors
-            {
+            let map = self.shared_colors.lock();
+            if *map != self.target_colors {
                 self.prev_colors = self.interpolated_colors();
                 self.target_colors = map.clone();
                 self.color_transition_start = Instant::now();
@@ -470,7 +470,8 @@ impl App {
     fn update_album_art_texture(&mut self) {
         // Check the generation counter without cloning the (potentially large) bytes.
         // Only lock briefly to read the generation and, if changed, take the bytes.
-        let update = self.viz_state.lock().ok().and_then(|s| {
+        let update = {
+            let s = self.viz_state.lock();
             if s.artwork_bytes.is_some() && s.artwork_generation != self.loaded_artwork_gen {
                 // Only clone when the artwork actually changed (not every frame)
                 Some((s.artwork_bytes.clone(), s.artwork_generation))
@@ -479,7 +480,7 @@ impl App {
             } else {
                 None
             }
-        });
+        };
 
         if let Some((bytes_opt, generation)) = update {
             if let Some(bytes) = bytes_opt {
@@ -563,7 +564,7 @@ impl App {
             Effect::Pulse => "Pulse",
         };
         let (palette_name, track_title) = {
-            let state = self.viz_state.lock().unwrap();
+            let state = self.viz_state.lock();
             let name = if state.track_title.is_some() {
                 "album-art".to_string()
             } else if self.current_palette_index < self.palette_names.len() {
@@ -601,7 +602,7 @@ impl App {
         let box_w = em.width.max(pm.width).max(am.width) + 14.0;
 
         // Color swatches measurement
-        let colors = self.viz_state.lock().unwrap().colors.clone();
+        let colors = self.viz_state.lock().colors.clone();
         let swatch_total_w = 22.0 * colors.len() as f32;
         let box_w = box_w.max(swatch_total_w + 80.0);
 
@@ -767,10 +768,9 @@ impl App {
             if let Some(colors) = crate::palettes::get_palette(palette_name) {
                 self.current_palette_index = index;
                 self.stop_album_art_watcher();
-                if let Ok(mut state) = self.viz_state.lock() {
-                    state.colors = colors.clone();
-                    state.track_title = None;
-                }
+                let mut state = self.viz_state.lock();
+                state.colors = colors.clone();
+                state.track_title = None;
                 let _ = self.visualizer_tx.send(VisualizerMsg::SetPalette(colors));
             }
         }
@@ -832,12 +832,11 @@ impl App {
             // Initial fetch
             if let Some((artwork, colors)) = crate::now_playing::fetch_artwork_and_palette() {
                 let title = crate::now_playing::get_track_title();
-                if let Ok(mut state) = viz_state.lock() {
-                    state.colors = colors.clone();
-                    state.track_title = title;
-                    state.artwork_bytes = Some(artwork);
-                    state.artwork_generation += 1;
-                }
+                let mut state = viz_state.lock();
+                state.colors = colors.clone();
+                state.track_title = title;
+                state.artwork_bytes = Some(artwork);
+                state.artwork_generation += 1;
                 let _ = tx.send(VisualizerMsg::SetPalette(colors));
             }
 
@@ -853,12 +852,11 @@ impl App {
                     last_title = title.clone();
                     if let Some((artwork, colors)) = crate::now_playing::fetch_artwork_and_palette()
                     {
-                        if let Ok(mut state) = viz_state.lock() {
-                            state.colors = colors.clone();
-                            state.track_title = title;
-                            state.artwork_bytes = Some(artwork);
-                            state.artwork_generation += 1;
-                        }
+                        let mut state = viz_state.lock();
+                        state.colors = colors.clone();
+                        state.track_title = title;
+                        state.artwork_bytes = Some(artwork);
+                        state.artwork_generation += 1;
                         let _ = tx.send(VisualizerMsg::SetPalette(colors));
                     }
                 }
@@ -870,10 +868,9 @@ impl App {
         if let Some(stop) = self.album_art_stop.take() {
             stop.store(true, Ordering::Relaxed);
         }
-        if let Ok(mut state) = self.viz_state.lock() {
-            state.track_title = None;
-            state.artwork_bytes = None;
-        }
+        let mut state = self.viz_state.lock();
+        state.track_title = None;
+        state.artwork_bytes = None;
     }
 }
 
