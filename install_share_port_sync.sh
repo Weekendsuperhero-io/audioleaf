@@ -68,7 +68,7 @@ sudo apt-get install -y --no-install-recommends \
   libpopt-dev libconfig-dev libasound2-dev \
   avahi-daemon libavahi-client-dev libssl-dev libsoxr-dev \
   libplist-dev libsodium-dev uuid-dev libgcrypt-dev xxd libplist-utils \
-  libavutil-dev libavcodec-dev libavformat-dev
+  libavutil-dev libavcodec-dev libavformat-dev libswresample-dev
 sudo apt-get install -y --no-install-recommends systemd-dev || true
 
 echo "[5/11] Configure ALSA loopback module"
@@ -95,7 +95,8 @@ cd shairport-sync
 git pull --ff-only || true
 autoreconf -fi
 ./configure --sysconfdir=/etc --with-alsa --with-soxr --with-avahi \
-  --with-ssl=openssl --with-systemd-startup --with-airplay-2
+  --with-ssl=openssl --with-systemd-startup --with-airplay-2 \
+  --with-ffmpeg --with-metadata
 make -j"$(nproc)"
 sudo make install
 
@@ -128,6 +129,19 @@ echo
 echo "Versions:"
 nqptp -V || true
 shairport-sync -V || true
+
+echo
+echo "Verify Shairport build capabilities (AirPlay2 + FFmpeg):"
+SHAIRPORT_VERSION="$(shairport-sync -V 2>/dev/null || true)"
+if ! echo "${SHAIRPORT_VERSION}" | grep -q "AirPlay2"; then
+  echo "ERROR: Installed shairport-sync does not report AirPlay2 support: ${SHAIRPORT_VERSION}" >&2
+  exit 1
+fi
+if ! echo "${SHAIRPORT_VERSION}" | grep -qi "ffmpeg"; then
+  echo "ERROR: Installed shairport-sync does not report FFmpeg support: ${SHAIRPORT_VERSION}" >&2
+  exit 1
+fi
+echo "OK: ${SHAIRPORT_VERSION}"
 
 echo
 echo "Service status:"
