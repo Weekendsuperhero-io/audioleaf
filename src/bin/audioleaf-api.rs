@@ -28,7 +28,7 @@ use tower_http::cors::{Any, CorsLayer};
 #[command(version, about = "Audioleaf HTTP API", author)]
 struct ApiOptions {
     /// Host interface to bind
-    #[arg(long, default_value = "127.0.0.1")]
+    #[arg(long, default_value = "0.0.0.0")]
     host: String,
 
     /// HTTP port for the API server
@@ -76,6 +76,7 @@ const NOW_PLAYING_RETRY_DELAY: Duration = Duration::from_secs(3);
 const LIVE_VISUALIZER_WATCHDOG_INTERVAL: Duration = Duration::from_secs(2);
 const LIVE_VISUALIZER_RESTART_FAILURE_LIMIT: u32 = 3;
 const LIVE_VISUALIZER_RESTART_COOLDOWN: Duration = Duration::from_secs(1);
+const LIVE_VISUALIZER_RESTART_COOLDOWN_MAX: Duration = Duration::from_secs(60);
 const LIVE_VISUALIZER_HEALTHY_PINGS_TO_CLEAR_FAILURES: u8 = 2;
 
 #[derive(Clone, Debug, Default)]
@@ -1477,8 +1478,11 @@ fn live_visualizer_restart_cooldown_remaining(
     let Some(last_restart_at_ms) = guard.last_restart_at_ms else {
         return Ok(None);
     };
+    let base_ms = LIVE_VISUALIZER_RESTART_COOLDOWN.as_millis() as u64;
+    let max_ms = LIVE_VISUALIZER_RESTART_COOLDOWN_MAX.as_millis() as u64;
+    let shift = guard.consecutive_restart_failures.min(20);
+    let cooldown_ms = base_ms.checked_shl(shift).unwrap_or(max_ms).min(max_ms);
     let now_ms = now_unix_ms();
-    let cooldown_ms = LIVE_VISUALIZER_RESTART_COOLDOWN.as_millis() as u64;
     let elapsed_ms = now_ms.saturating_sub(last_restart_at_ms);
     if elapsed_ms >= cooldown_ms {
         Ok(None)

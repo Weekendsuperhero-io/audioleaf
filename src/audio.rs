@@ -53,6 +53,8 @@ impl AudioStream {
                     "BlackHole 2ch",
                     "BlackHole 16ch",
                     "Loopback Audio",
+                    "Loopback",
+                    "snd-aloop",
                     "CABLE Output",
                     "VB-Audio",
                     "Monitor",
