@@ -3,6 +3,7 @@ pub mod config;
 pub mod constants;
 pub mod layout_visualizer;
 pub mod nanoleaf;
+pub mod now_playing;
 pub mod palettes;
 pub mod panic;
 pub mod processing;

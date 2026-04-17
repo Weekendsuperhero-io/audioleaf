@@ -878,10 +878,10 @@ function App() {
       <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
         <div>
           <p className="mb-2 text-xs uppercase tracking-[0.2em] text-muted-foreground">
-            Audioleaf Web Control
+            Nanoleaf Audio Web Controller
           </p>
           <h1 className="font-display text-4xl font-semibold text-foreground sm:text-5xl">
-            Axum + React Dashboard
+            Nanoleaf Dashboard
           </h1>
         </div>
         <div className="flex items-center gap-2">

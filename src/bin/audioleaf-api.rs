@@ -1264,30 +1264,7 @@ fn detect_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
 }
 
 fn extract_prominent_colors(image_bytes: &[u8]) -> Option<Vec<[u8; 3]>> {
-    use auto_palette::{ImageData, Palette};
-
-    let image = image::load_from_memory(image_bytes).ok()?;
-    let rgba = image.to_rgba8();
-    let image_data = ImageData::new(rgba.width(), rgba.height(), rgba.as_raw()).ok()?;
-    let palette: Palette<f64> = Palette::extract(&image_data).ok()?;
-    let mut swatches = palette.swatches().to_vec();
-    swatches.sort_by_key(|swatch| std::cmp::Reverse(swatch.population()));
-
-    let colors: Vec<[u8; 3]> = swatches
-        .iter()
-        .filter(|swatch| swatch.color().to_oklch().l > 0.15)
-        .take(4)
-        .map(|swatch| {
-            let rgb = swatch.color().to_rgb();
-            [rgb.r, rgb.g, rgb.b]
-        })
-        .collect();
-
-    if colors.is_empty() {
-        None
-    } else {
-        Some(colors)
-    }
+    audioleaf::now_playing::extract_prominent_colors_from_bytes(image_bytes)
 }
 
 fn apply_now_playing_palette_to_live_runtime(state: &ApiState, colors: Vec<[u8; 3]>) {

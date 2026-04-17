@@ -16,6 +16,36 @@ macro_rules! debug_log {
     };
 }
 
+pub fn extract_prominent_colors_from_bytes(image_bytes: &[u8]) -> Option<Vec<[u8; 3]>> {
+    use auto_palette::{ImageData, Palette, Theme};
+
+    let img = image::load_from_memory(image_bytes).ok()?;
+    let rgba = img.to_rgba8();
+    let image_data = ImageData::new(rgba.width(), rgba.height(), rgba.as_raw()).ok()?;
+    let palette: Palette<f64> = Palette::extract(&image_data).ok()?;
+
+    let swatches = palette
+        .find_swatches_with_theme(6, Theme::Vivid)
+        .or_else(|_| palette.find_swatches(6))
+        .ok()?;
+
+    let colors: Vec<[u8; 3]> = swatches
+        .iter()
+        .filter(|s| s.color().to_oklch().l > 0.2)
+        .take(4)
+        .map(|s| {
+            let rgb = s.color().to_rgb();
+            [rgb.r, rgb.g, rgb.b]
+        })
+        .collect();
+
+    if colors.is_empty() {
+        None
+    } else {
+        Some(colors)
+    }
+}
+
 /// Returns the title of the currently playing track.
 pub fn get_track_title() -> Option<String> {
     #[cfg(target_os = "macos")]
@@ -372,28 +402,7 @@ mod macos {
     }
 
     pub fn extract_colors(image_bytes: &[u8]) -> Option<Vec<[u8; 3]>> {
-        use auto_palette::{ImageData, Palette};
-
-        let img = image::load_from_memory(image_bytes).ok()?;
-        let rgba = img.to_rgba8();
-        let image_data = ImageData::new(rgba.width(), rgba.height(), rgba.as_raw()).ok()?;
-        let palette: Palette<f64> = Palette::extract(&image_data).ok()?;
-        let mut swatches = palette.swatches().to_vec();
-        swatches.sort_by_key(|s| std::cmp::Reverse(s.population()));
-        let colors: Vec<[u8; 3]> = swatches
-            .iter()
-            .filter(|s| s.color().to_oklch().l > 0.15)
-            .take(4)
-            .map(|s| {
-                let rgb = s.color().to_rgb();
-                [rgb.r, rgb.g, rgb.b]
-            })
-            .collect();
-        if colors.is_empty() {
-            None
-        } else {
-            Some(colors)
-        }
+        super::extract_prominent_colors_from_bytes(image_bytes)
     }
 }
 
@@ -439,27 +448,6 @@ mod linux {
     }
 
     pub fn extract_colors_from_bytes(bytes: &[u8]) -> Option<Vec<[u8; 3]>> {
-        use auto_palette::{ImageData, Palette};
-
-        let img = image::load_from_memory(bytes).ok()?;
-        let rgba = img.to_rgba8();
-        let image_data = ImageData::new(rgba.width(), rgba.height(), rgba.as_raw()).ok()?;
-        let palette: Palette<f64> = Palette::extract(&image_data).ok()?;
-        let mut swatches = palette.swatches().to_vec();
-        swatches.sort_by_key(|s| std::cmp::Reverse(s.population()));
-        let colors: Vec<[u8; 3]> = swatches
-            .iter()
-            .filter(|s| s.color().to_oklch().l > 0.15)
-            .take(4)
-            .map(|s| {
-                let rgb = s.color().to_rgb();
-                [rgb.r, rgb.g, rgb.b]
-            })
-            .collect();
-        if colors.is_empty() {
-            None
-        } else {
-            Some(colors)
-        }
+        super::extract_prominent_colors_from_bytes(bytes)
     }
 }
