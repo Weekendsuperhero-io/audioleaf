@@ -77,13 +77,12 @@ pub enum Effect {
     /// Brightness pulses with audio energy in that band (fast attack, slow decay).
     #[default]
     Spectrum,
-    /// Audio energy enters from one end and cascades across panels as a traveling wave.
-    /// Creates a flowing ripple effect driven by overall audio amplitude.
+    /// Each panel tracks its own frequency band (like Spectrum) but brightness
+    /// bleeds into neighboring panels, creating a flowing wave across the array.
     EnergyWave,
-    /// All panels pulse together, driven directly by audio transients.
-    /// Very fast attack snaps to each beat; smooth exponential decay fades between hits.
-    /// The music's own rhythm drives the animation — no fixed oscillation.
-    Pulse,
+    /// Onset-triggered pulses propagate outward from panel 0 like ripples on water
+    /// or a starship jumping to warp — bright leading edge stretching into a fading trail.
+    Ripple,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -324,12 +323,12 @@ impl Config {
                     let effect = match s.as_str() {
                         "Spectrum" | "spectrum" => Some(Effect::Spectrum),
                         "EnergyWave" | "energy_wave" | "energy-wave" => Some(Effect::EnergyWave),
-                        "Pulse" | "pulse" => Some(Effect::Pulse),
+                        "Ripple" | "ripple" => Some(Effect::Ripple),
                         _ => None,
                     };
                     if effect.is_none() {
                         bail!(
-                            "effect must be `Spectrum`, `EnergyWave`, or `Pulse`, got `{}`",
+                            "effect must be `Spectrum`, `EnergyWave`, or `Ripple`, got `{}`",
                             s
                         );
                     };

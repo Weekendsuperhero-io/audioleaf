@@ -618,7 +618,7 @@ impl Visualizer {
                         &mut prev_max,
                         &mut speed,
                     ),
-                    Effect::Pulse => processing::update_brightness_pulse(
+                    Effect::Ripple => processing::update_brightness_ripple(
                         spectrum,
                         hz_per_bin,
                         self.min_freq,

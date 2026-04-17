@@ -565,7 +565,7 @@ impl App {
         let effect_str = match self.effect {
             Effect::Spectrum => "Spectrum",
             Effect::EnergyWave => "Energy Wave",
-            Effect::Pulse => "Pulse",
+            Effect::Ripple => "Ripple",
         };
         let (palette_name, track_title) = {
             let state = self.viz_state.lock();
@@ -741,7 +741,7 @@ impl App {
             ("[  /  ]", "Decrease / increase sample time window"),
             ("F", "Cycle frequency range preset"),
             ("1-9, 0", "Switch color palette"),
-            ("E", "Cycle effect: Spectrum / Energy Wave / Pulse"),
+            ("E", "Cycle effect: Spectrum / Energy Wave / Ripple"),
             ("A", "Toggle primary axis (X / Y)"),
             ("P", "Toggle primary sort (Asc / Desc)"),
             ("S", "Toggle secondary sort (Asc / Desc)"),
@@ -816,8 +816,8 @@ impl App {
     fn cycle_effect(&mut self) {
         self.effect = match self.effect {
             Effect::Spectrum => Effect::EnergyWave,
-            Effect::EnergyWave => Effect::Pulse,
-            Effect::Pulse => Effect::Spectrum,
+            Effect::EnergyWave => Effect::Ripple,
+            Effect::Ripple => Effect::Spectrum,
         };
         let _ = self
             .visualizer_tx

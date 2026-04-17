@@ -32,7 +32,7 @@ import { cn } from "@/lib/utils";
 
 type LoadState = "idle" | "loading" | "ready" | "error";
 const DEFAULT_BRIGHTNESS_DRAFT = "50";
-const EFFECT_OPTIONS = ["Spectrum", "EnergyWave", "Pulse"] as const;
+const EFFECT_OPTIONS = ["Spectrum", "EnergyWave", "Ripple"] as const;
 
 const LS_SHOW_LIVE_PREVIEW = "audioleaf.show_live_preview";
 const LS_DRIVE_PALETTE = "audioleaf.drive_visualizer_palette";
@@ -140,8 +140,8 @@ function normalizeEffect(value: string | null | undefined): EffectOption {
   if (value === "EnergyWave") {
     return "EnergyWave";
   }
-  if (value === "Pulse") {
-    return "Pulse";
+  if (value === "Ripple") {
+    return "Ripple";
   }
   return "Spectrum";
 }

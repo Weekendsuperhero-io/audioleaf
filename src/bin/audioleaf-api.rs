@@ -571,7 +571,7 @@ async fn put_visualizer_effect(
     Json(payload): Json<VisualizerEffectUpdateRequest>,
 ) -> ApiResult<ConfigResponse> {
     let effect = parse_effect(&payload.effect).ok_or_else(|| {
-        ApiError::bad_request("Invalid effect. Use Spectrum, EnergyWave, or Pulse.")
+        ApiError::bad_request("Invalid effect. Use Spectrum, EnergyWave, or Ripple.")
     })?;
 
     let config = update_runtime_config(&state, |config| {
@@ -1770,7 +1770,7 @@ fn parse_effect(input: &str) -> Option<audioleaf::config::Effect> {
         {
             Some(audioleaf::config::Effect::EnergyWave)
         }
-        x if x.eq_ignore_ascii_case("pulse") => Some(audioleaf::config::Effect::Pulse),
+        x if x.eq_ignore_ascii_case("ripple") => Some(audioleaf::config::Effect::Ripple),
         _ => None,
     }
 }
