@@ -8,14 +8,12 @@ use crate::{
 use anyhow::Result;
 use cpal::{InputCallbackInfo, SampleFormat, SizedSample, StreamError, traits::*};
 use dasp_sample::conv::ToSample;
+use flume::{self, RecvTimeoutError, TryRecvError};
 use hashbrown::HashMap;
 use palette::{FromColor, Oklch, Srgb};
 use parking_lot::Mutex;
 use std::{
-    sync::{
-        Arc,
-        mpsc::{self, RecvTimeoutError, TryRecvError},
-    },
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
@@ -143,7 +141,7 @@ pub struct Visualizer {
     max_freq: u16,
     hues: Vec<[u8; 3]>,
     effect: Effect,
-    shared_colors: Arc<Mutex<HashMap<u16, [u8; 3]>>>,
+    color_subscribers: Vec<flume::Sender<HashMap<u16, [u8; 3]>>>,
     stream_health: Option<Arc<Mutex<StreamHealth>>>,
 }
 
@@ -170,7 +168,7 @@ impl Visualizer {
         config: VisualizerConfig,
         audio_stream: AudioStream,
         nl_device: &NlDevice,
-        shared_colors: Arc<Mutex<HashMap<u16, [u8; 3]>>>,
+        color_subscribers: Vec<flume::Sender<HashMap<u16, [u8; 3]>>>,
     ) -> Result<Self> {
         let state = VisualizerState::default();
         let mut nl_udp = nanoleaf::NlUdp::new(nl_device)?;
@@ -210,7 +208,7 @@ impl Visualizer {
             max_freq,
             hues,
             effect,
-            shared_colors,
+            color_subscribers,
             stream_health: None,
         })
     }
@@ -312,7 +310,7 @@ impl Visualizer {
     ///
     /// Generic over sample type T supporting sized conversion to f32.
     /// Used in `create_data_callback` closure for CPAL stream.
-    fn send_samples<T>(data: &[T], n_channels: usize, tx: &mpsc::Sender<Vec<f32>>)
+    fn send_samples<T>(data: &[T], n_channels: usize, tx: &flume::Sender<Vec<f32>>)
     where
         T: SizedSample + ToSample<f32>,
     {
@@ -337,7 +335,7 @@ impl Visualizer {
     /// Generic T for sample type matching AudioStream format.
     fn create_data_callback<T>(
         n_channels: usize,
-        tx: mpsc::Sender<Vec<f32>>,
+        tx: flume::Sender<Vec<f32>>,
     ) -> impl FnMut(&[T], &InputCallbackInfo) + Send + 'static
     where
         T: SizedSample + ToSample<f32>,
@@ -367,7 +365,7 @@ impl Visualizer {
         }
     }
 
-    fn process_stream_faults(rx_stream_fault: &mpsc::Receiver<StreamFault>) -> bool {
+    fn process_stream_faults(rx_stream_fault: &flume::Receiver<StreamFault>) -> bool {
         match rx_stream_fault.try_recv() {
             Ok(StreamFault::DeviceUnavailable) => true,
             Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => false,
@@ -417,7 +415,7 @@ impl Visualizer {
 
     fn process_pending_events(
         &mut self,
-        rx_events: &mpsc::Receiver<VisualizerMsg>,
+        rx_events: &flume::Receiver<VisualizerMsg>,
         base_colors: &mut Vec<Oklch>,
         brightness: &mut Vec<f32>,
         prev_max: &mut [f32],
@@ -450,13 +448,13 @@ impl Visualizer {
     /// Returns sender for sending `VisualizerMsg` to control runtime behavior.
     ///
     /// Consumes self (moved into thread closure).
-    pub fn init(mut self) -> mpsc::Sender<VisualizerMsg> {
-        let (tx_events, rx_events) = mpsc::channel();
+    pub fn init(mut self) -> flume::Sender<VisualizerMsg> {
+        let (tx_events, rx_events) = flume::unbounded();
         thread::spawn(move || {
             panic::register_backtrace_panic_handler();
             Self::set_stream_health(&self.stream_health, StreamHealth::Starting);
-            let (tx_audio, rx_audio) = mpsc::channel();
-            let (tx_stream_fault, rx_stream_fault) = mpsc::channel();
+            let (tx_audio, rx_audio) = flume::unbounded();
+            let (tx_stream_fault, rx_stream_fault) = flume::unbounded();
             let stream_errors = Arc::new(Mutex::new(StreamErrorTelemetry::new()));
             macro_rules! build_input_stream {
                 ($type:ty) => {
@@ -647,17 +645,21 @@ impl Visualizer {
                         let _ = self.nl_udp.update_panels(&display_colors, self.trans_time);
                     }
                 }
-                // Share display colors with the graphical UI for panel preview
+                // Share display colors with subscribers (API preview, macroquad UI)
                 // Clamp to sRGB gamut before converting to u8 to avoid
                 // wrap-around artifacts from out-of-gamut Oklch values
-                let mut map = self.shared_colors.lock();
-                map.clear();
-                for (i, color) in display_colors.iter().enumerate() {
-                    let srgb: Srgb<f32> = Srgb::from_color(*color);
-                    let r = (srgb.red.clamp(0.0, 1.0) * 255.0) as u8;
-                    let g = (srgb.green.clamp(0.0, 1.0) * 255.0) as u8;
-                    let b = (srgb.blue.clamp(0.0, 1.0) * 255.0) as u8;
-                    map.insert(self.nl_udp.panels[i].id, [r, g, b]);
+                if !self.color_subscribers.is_empty() {
+                    let mut frame = HashMap::with_capacity(display_colors.len());
+                    for (i, color) in display_colors.iter().enumerate() {
+                        let srgb: Srgb<f32> = Srgb::from_color(*color);
+                        let r = (srgb.red.clamp(0.0, 1.0) * 255.0) as u8;
+                        let g = (srgb.green.clamp(0.0, 1.0) * 255.0) as u8;
+                        let b = (srgb.blue.clamp(0.0, 1.0) * 255.0) as u8;
+                        frame.insert(self.nl_udp.panels[i].id, [r, g, b]);
+                    }
+                    for tx in &self.color_subscribers {
+                        let _ = tx.try_send(frame.clone());
+                    }
                 }
             }
             Self::set_stream_health(&self.stream_health, StreamHealth::Stopped);

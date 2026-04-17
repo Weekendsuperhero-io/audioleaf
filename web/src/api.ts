@@ -51,10 +51,14 @@ export type NowPlayingTrack = {
   title: string | null;
   artist: string | null;
   album: string | null;
+  genre: string | null;
+  composer: string | null;
   stream_url: string | null;
   source_name: string | null;
   source_ip: string | null;
   user_agent: string | null;
+  duration_ms: number | null;
+  song_data_kind: number | null;
 };
 
 export type NowPlayingResponse = {
@@ -67,6 +71,10 @@ export type NowPlayingResponse = {
   artwork_available: boolean;
   artwork_generation: number;
   updated_at_ms: number | null;
+  playback_state: "stopped" | "playing" | "paused";
+  progress_elapsed_secs: number | null;
+  progress_total_secs: number | null;
+  volume_db: number | null;
 };
 
 export type NowPlayingSettingsUpdateRequest = {

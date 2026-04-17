@@ -20,6 +20,7 @@ axum = "0.8.9"
 cpal = "0.17.3"
 dasp_sample = "0.11.0"
 dirs = "6.0.0"
+flume = "0.12"
 hashbrown = "0.17"
 macroquad = "0.4"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
@@ -31,7 +32,7 @@ quick-xml = "0.39"
 reqwest = { version = "0.13", features = ["blocking", "json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1.52.0", features = ["macros", "rt-multi-thread", "net", "time", "io-util", "signal"] }
+tokio = { version = "1.52.1", features = ["macros", "rt-multi-thread", "net", "time", "io-util", "signal"] }
 toml = "1"
 tower-http = { version = "0.6.8", features = ["cors"] }
 

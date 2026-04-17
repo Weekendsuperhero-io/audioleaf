@@ -19,7 +19,7 @@ use std::{
     io::{BufRead, BufReader},
     net::SocketAddr,
     path::PathBuf,
-    sync::{Arc, mpsc::Sender},
+    sync::Arc,
     thread,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
@@ -58,10 +58,11 @@ struct ApiState {
 
 #[derive(Clone, Debug)]
 struct LiveVisualizerRuntime {
-    sender: Sender<audioleaf::visualizer::VisualizerMsg>,
+    sender: flume::Sender<audioleaf::visualizer::VisualizerMsg>,
     global_orientation: u16,
     device: DeviceSummary,
-    shared_colors: Arc<Mutex<HashMap<u16, [u8; 3]>>>,
+    color_rx: flume::Receiver<HashMap<u16, [u8; 3]>>,
+    latest_colors: Arc<Mutex<HashMap<u16, [u8; 3]>>>,
     stream_health: Arc<Mutex<audioleaf::visualizer::StreamHealth>>,
 }
 
@@ -81,15 +82,30 @@ const LIVE_VISUALIZER_RESTART_COOLDOWN: Duration = Duration::from_secs(1);
 const LIVE_VISUALIZER_RESTART_COOLDOWN_MAX: Duration = Duration::from_secs(60);
 const LIVE_VISUALIZER_HEALTHY_PINGS_TO_CLEAR_FAILURES: u8 = 2;
 
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PlaybackState {
+    #[default]
+    Stopped,
+    Playing,
+    Paused,
+}
+
 #[derive(Clone, Debug, Default)]
 struct NowPlayingTrackData {
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
+    genre: Option<String>,
+    composer: Option<String>,
     stream_url: Option<String>,
     source_name: Option<String>,
     source_ip: Option<String>,
     user_agent: Option<String>,
+    /// Song data kind: 0 = timed track (has duration), 1 = untimed stream (radio)
+    song_data_kind: Option<u32>,
+    /// Track duration in milliseconds (from DMAP "astm" code)
+    duration_ms: Option<u64>,
 }
 
 impl NowPlayingTrackData {
@@ -131,6 +147,11 @@ struct NowPlayingRuntimeState {
     artwork_mime_type: Option<String>,
     artwork_generation: u64,
     updated_at_ms: Option<u64>,
+    playback_state: PlaybackState,
+    /// Progress from "prgr": RTP timestamps at 44100 fps as (start, current, end)
+    progress_rtp: Option<(u64, u64, u64)>,
+    /// AirPlay volume in dB (0.0 to -30.0, -144.0 = mute)
+    volume_db: Option<f32>,
 }
 
 impl NowPlayingRuntimeState {
@@ -146,6 +167,9 @@ impl NowPlayingRuntimeState {
             artwork_mime_type: None,
             artwork_generation: 0,
             updated_at_ms: None,
+            playback_state: PlaybackState::default(),
+            progress_rtp: None,
+            volume_db: None,
         }
     }
 
@@ -155,10 +179,23 @@ impl NowPlayingRuntimeState {
         self.artwork_bytes = None;
         self.artwork_mime_type = None;
         self.artwork_generation = self.artwork_generation.saturating_add(1);
+        self.progress_rtp = None;
         self.updated_at_ms = Some(now_unix_ms());
     }
 
+    /// Returns (elapsed_secs, total_secs) derived from RTP timestamps at 44100 Hz.
+    fn progress_seconds(&self) -> Option<(f64, f64)> {
+        let (start, current, end) = self.progress_rtp?;
+        let elapsed = current.wrapping_sub(start) as f64 / 44100.0;
+        let total = end.wrapping_sub(start) as f64 / 44100.0;
+        Some((elapsed, total))
+    }
+
     fn snapshot(&self) -> NowPlayingResponse {
+        let (progress_elapsed_secs, progress_total_secs) = self
+            .progress_seconds()
+            .map(|(e, t)| (Some(e), Some(t)))
+            .unwrap_or((None, None));
         NowPlayingResponse {
             reader_running: self.reader_running,
             metadata_pipe_path: self.metadata_pipe_path.clone(),
@@ -168,15 +205,23 @@ impl NowPlayingRuntimeState {
                 title: self.track.title.clone(),
                 artist: self.track.artist.clone(),
                 album: self.track.album.clone(),
+                genre: self.track.genre.clone(),
+                composer: self.track.composer.clone(),
                 stream_url: self.track.stream_url.clone(),
                 source_name: self.track.source_name.clone(),
                 source_ip: self.track.source_ip.clone(),
                 user_agent: self.track.user_agent.clone(),
+                duration_ms: self.track.duration_ms,
+                song_data_kind: self.track.song_data_kind,
             }),
             palette_colors: self.palette_colors.clone(),
             artwork_available: self.artwork_bytes.is_some(),
             artwork_generation: self.artwork_generation,
             updated_at_ms: self.updated_at_ms,
+            playback_state: self.playback_state.clone(),
+            progress_elapsed_secs,
+            progress_total_secs,
+            volume_db: self.volume_db,
         }
     }
 }
@@ -186,10 +231,14 @@ struct NowPlayingTrackResponse {
     title: Option<String>,
     artist: Option<String>,
     album: Option<String>,
+    genre: Option<String>,
+    composer: Option<String>,
     stream_url: Option<String>,
     source_name: Option<String>,
     source_ip: Option<String>,
     user_agent: Option<String>,
+    duration_ms: Option<u64>,
+    song_data_kind: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -203,6 +252,10 @@ struct NowPlayingResponse {
     artwork_available: bool,
     artwork_generation: u64,
     updated_at_ms: Option<u64>,
+    playback_state: PlaybackState,
+    progress_elapsed_secs: Option<f64>,
+    progress_total_secs: Option<f64>,
+    volume_db: Option<f32>,
 }
 
 #[derive(Debug, Serialize)]
@@ -927,6 +980,17 @@ async fn get_audio_backends(State(state): State<ApiState>) -> ApiResult<AudioBac
     }))
 }
 
+fn latest_panel_colors(runtime: &LiveVisualizerRuntime) -> HashMap<u16, [u8; 3]> {
+    let mut latest = None;
+    while let Ok(frame) = runtime.color_rx.try_recv() {
+        latest = Some(frame);
+    }
+    if let Some(frame) = latest {
+        *runtime.latest_colors.lock() = frame;
+    }
+    runtime.latest_colors.lock().clone()
+}
+
 async fn get_visualizer_preview(
     State(state): State<ApiState>,
 ) -> ApiResult<VisualizerPreviewResponse> {
@@ -938,7 +1002,7 @@ async fn get_visualizer_preview(
         }));
     };
 
-    let colors_map = runtime.shared_colors.lock();
+    let colors_map = latest_panel_colors(&runtime);
     let mut panel_colors: Vec<VisualizerPreviewPanelColor> = colors_map
         .iter()
         .map(|(panel_id, rgb)| VisualizerPreviewPanelColor {
@@ -1192,46 +1256,95 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
     guard.last_error = None;
     guard.updated_at_ms = Some(now_unix_ms());
 
-    if item_type == "core" {
-        if code.eq_ignore_ascii_case("minm") {
-            guard.track.title = payload_text;
-        } else if code.eq_ignore_ascii_case("asar") {
-            guard.track.artist = payload_text;
-        } else if code.eq_ignore_ascii_case("asal") {
-            guard.track.album = payload_text;
-        } else if code.eq_ignore_ascii_case("asul") {
-            guard.track.stream_url = payload_text;
-        }
-    } else if item_type == "ssnc" {
-        if code.eq_ignore_ascii_case("snam") {
-            guard.track.source_name = payload_text;
-        } else if code.eq_ignore_ascii_case("snua") {
-            guard.track.user_agent = payload_text;
-        } else if code.eq_ignore_ascii_case("clip") || code.eq_ignore_ascii_case("conn") {
-            guard.track.source_ip = payload_text;
-        } else if code.eq_ignore_ascii_case("PICT") {
-            if !payload.is_empty() {
-                let colors = extract_prominent_colors(&payload).unwrap_or_default();
-                guard.artwork_mime_type = detect_image_mime_type(&payload).map(str::to_string);
-                guard.artwork_bytes = Some(payload);
-                guard.artwork_generation = guard.artwork_generation.saturating_add(1);
-                guard.palette_colors = colors.clone();
-                if guard.drive_visualizer_palette && !colors.is_empty() {
-                    maybe_palette_to_apply = Some(colors);
+    match item_type {
+        "core" => match code {
+            "minm" => guard.track.title = payload_text,
+            "asar" => guard.track.artist = payload_text,
+            "asal" => guard.track.album = payload_text,
+            "asgn" => guard.track.genre = payload_text,
+            "ascp" => guard.track.composer = payload_text,
+            "asul" => guard.track.stream_url = payload_text,
+            "astm" => guard.track.duration_ms = dmap_payload_u64(&payload),
+            "asdk" => guard.track.song_data_kind = dmap_payload_u32(&payload),
+            _ => {}
+        },
+        "ssnc" => match code {
+            "snam" => guard.track.source_name = payload_text,
+            "snua" => guard.track.user_agent = payload_text,
+            "clip" | "conn" => guard.track.source_ip = payload_text,
+            "PICT" => {
+                if !payload.is_empty() {
+                    let colors = extract_prominent_colors(&payload).unwrap_or_default();
+                    guard.artwork_mime_type = detect_image_mime_type(&payload).map(str::to_string);
+                    guard.artwork_bytes = Some(payload);
+                    guard.artwork_generation = guard.artwork_generation.saturating_add(1);
+                    guard.palette_colors = colors.clone();
+                    if guard.drive_visualizer_palette && !colors.is_empty() {
+                        maybe_palette_to_apply = Some(colors);
+                    }
                 }
             }
-        } else if code.eq_ignore_ascii_case("pbeg")
-            || code.eq_ignore_ascii_case("pend")
-            || code.eq_ignore_ascii_case("pfls")
-            || code.eq_ignore_ascii_case("disc")
-        {
-            guard.clear_session_data();
-        }
+            // Playback state transitions
+            "pbeg" => {
+                guard.clear_session_data();
+                guard.playback_state = PlaybackState::Playing;
+            }
+            "prsm" | "pres" => guard.playback_state = PlaybackState::Playing,
+            "pfls" | "paus" => guard.playback_state = PlaybackState::Paused,
+            "pend" | "disc" => {
+                guard.playback_state = PlaybackState::Stopped;
+                guard.clear_session_data();
+            }
+            // Progress: "start/current/end" RTP timestamps at 44100 Hz
+            "prgr" => guard.progress_rtp = parse_prgr(&payload),
+            // Volume: "airplay_vol,actual_vol,lowest,highest" in dB
+            "pvol" => guard.volume_db = parse_pvol(&payload),
+            // Metadata bundle boundaries (informational — no action needed)
+            "mdst" | "mden" | "pcst" | "pcen" => {}
+            _ => {}
+        },
+        _ => {}
     }
+
+    drop(guard);
 
     if let Some(colors) = maybe_palette_to_apply {
         apply_now_playing_palette_to_live_runtime(state, colors);
     }
+}
+
+fn dmap_payload_u32(payload: &[u8]) -> Option<u32> {
+    match payload.len() {
+        1 => Some(payload[0] as u32),
+        2 => Some(u16::from_be_bytes([payload[0], payload[1]]) as u32),
+        4 => Some(u32::from_be_bytes([
+            payload[0], payload[1], payload[2], payload[3],
+        ])),
+        _ => None,
+    }
+}
+
+fn dmap_payload_u64(payload: &[u8]) -> Option<u64> {
+    match payload.len() {
+        1..=4 => dmap_payload_u32(payload).map(|v| v as u64),
+        8 => Some(u64::from_be_bytes(payload[..8].try_into().ok()?)),
+        _ => None,
+    }
+}
+
+fn parse_prgr(payload: &[u8]) -> Option<(u64, u64, u64)> {
+    let text = std::str::from_utf8(payload).ok()?;
+    let mut parts = text.split('/');
+    let start = parts.next()?.trim().parse().ok()?;
+    let current = parts.next()?.trim().parse().ok()?;
+    let end = parts.next()?.trim().parse().ok()?;
+    Some((start, current, end))
+}
+
+fn parse_pvol(payload: &[u8]) -> Option<f32> {
+    let text = std::str::from_utf8(payload).ok()?;
+    let first = text.split(',').next()?.trim();
+    first.parse().ok()
 }
 
 fn payload_bytes_to_string(payload: &[u8]) -> Option<String> {
@@ -1598,13 +1711,13 @@ fn build_live_visualizer(state: &ApiState) -> Result<LiveVisualizerRuntime, ApiE
         }
     };
 
-    let shared_colors = Arc::new(Mutex::new(HashMap::new()));
+    let (color_tx, color_rx) = flume::bounded(1);
     let stream_health = Arc::new(Mutex::new(audioleaf::visualizer::StreamHealth::Starting));
     let visualizer = audioleaf::visualizer::Visualizer::new(
         config.visualizer_config,
         audio_stream,
         &nl_device,
-        Arc::clone(&shared_colors),
+        vec![color_tx],
     )
     .map_err(ApiError::internal)?
     .with_stream_health(Arc::clone(&stream_health));
@@ -1622,7 +1735,8 @@ fn build_live_visualizer(state: &ApiState) -> Result<LiveVisualizerRuntime, ApiE
             name: nl_device.name,
             ip: nl_device.ip.to_string(),
         },
-        shared_colors,
+        color_rx,
+        latest_colors: Arc::new(Mutex::new(HashMap::new())),
         stream_health,
     })
 }

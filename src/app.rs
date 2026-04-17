@@ -14,7 +14,6 @@ use std::f32::consts::PI;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
-    mpsc,
 };
 use std::time::{Duration, Instant};
 
@@ -35,8 +34,8 @@ pub struct App {
     global_orientation: u16,
 
     // Visualizer
-    visualizer_tx: mpsc::Sender<VisualizerMsg>,
-    shared_colors: Arc<Mutex<HashMap<u16, [u8; 3]>>>,
+    visualizer_tx: flume::Sender<VisualizerMsg>,
+    color_rx: flume::Receiver<HashMap<u16, [u8; 3]>>,
 
     // Settings
     gain: f32,
@@ -111,14 +110,13 @@ impl App {
         let layout = nl_device.get_panel_layout()?;
         let panels = crate::layout_visualizer::parse_layout(&layout)?;
 
-        // Shared color state: visualizer thread writes panel colors, UI reads them
-        let shared_colors: Arc<Mutex<HashMap<u16, [u8; 3]>>> = Arc::new(Mutex::new(HashMap::new()));
+        let (color_tx, color_rx) = flume::bounded(1);
 
         let tx = visualizer::Visualizer::new(
             visualizer_config,
             audio_stream,
             &nl_device,
-            Arc::clone(&shared_colors),
+            vec![color_tx],
         )?
         .with_stream_health(Arc::new(Mutex::new(visualizer::StreamHealth::Starting)))
         .init();
@@ -142,7 +140,7 @@ impl App {
             panels,
             global_orientation,
             visualizer_tx: tx,
-            shared_colors,
+            color_rx,
             gain,
             time_window,
             transition_time,
@@ -361,10 +359,16 @@ impl App {
 
         // Snapshot visualization colors with smooth interpolation
         let vis_colors = if self.show_visualization {
-            let map = self.shared_colors.lock();
-            if *map != self.target_colors {
+            // Drain channel to get the most recent frame
+            let mut latest = None;
+            while let Ok(frame) = self.color_rx.try_recv() {
+                latest = Some(frame);
+            }
+            if let Some(frame) = latest
+                && frame != self.target_colors
+            {
                 self.prev_colors = self.interpolated_colors();
-                self.target_colors = map.clone();
+                self.target_colors = frame;
                 self.color_transition_start = Instant::now();
             }
             Some(self.interpolated_colors())

@@ -113,6 +113,12 @@ function formatTenths(value: number): string {
   return (Math.round(value * 10) / 10).toFixed(1);
 }
 
+function formatSeconds(totalSecs: number): string {
+  const m = Math.floor(totalSecs / 60);
+  const s = Math.floor(totalSecs % 60);
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
 function extractBrightnessFromInfo(info: Record<string, unknown>): number | null {
   const state = info.state;
   if (!state || typeof state !== "object") {
@@ -979,12 +985,59 @@ function App() {
                     {nowPlaying.track.album}
                   </p>
                 ) : null}
+                {nowPlaying?.track?.genre || nowPlaying?.track?.composer ? (
+                  <p className="mt-0.5 text-xs text-muted-foreground/60">
+                    {[nowPlaying.track.genre, nowPlaying.track.composer]
+                      .filter(Boolean)
+                      .join(" · ")}
+                  </p>
+                ) : null}
                 {nowPlaying?.track?.source_name || nowPlaying?.track?.source_ip ? (
                   <p className="mt-2 text-xs uppercase tracking-[0.15em] text-muted-foreground/70">
                     via {nowPlaying.track.source_name ?? nowPlaying.track.source_ip}
                   </p>
                 ) : null}
               </div>
+
+              {nowPlaying?.playback_state && nowPlaying.playback_state !== "stopped" ? (
+                <div className="flex w-full max-w-xs flex-col items-center gap-1.5">
+                  <div className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span
+                      className={cn(
+                        "inline-block h-2 w-2 rounded-full",
+                        nowPlaying.playback_state === "playing"
+                          ? "bg-green-500"
+                          : "bg-yellow-500",
+                      )}
+                    />
+                    <span className="uppercase tracking-[0.15em]">
+                      {nowPlaying.playback_state}
+                    </span>
+                    {nowPlaying.volume_db != null ? (
+                      <span className="ml-1 text-muted-foreground/60">
+                        {nowPlaying.volume_db <= -144
+                          ? "Muted"
+                          : `${Math.round(nowPlaying.volume_db)} dB`}
+                      </span>
+                    ) : null}
+                  </div>
+                  {nowPlaying.progress_total_secs != null &&
+                  nowPlaying.progress_total_secs > 0 ? (
+                    <div className="flex w-full items-center gap-2 text-[10px] tabular-nums text-muted-foreground/70">
+                      <span>{formatSeconds(nowPlaying.progress_elapsed_secs ?? 0)}</span>
+                      <div className="relative h-1 flex-1 overflow-hidden rounded-full bg-border/60">
+                        <div
+                          className="absolute inset-y-0 left-0 rounded-full bg-primary/70 transition-[width] duration-1000 ease-linear"
+                          style={{
+                            width: `${Math.min(100, ((nowPlaying.progress_elapsed_secs ?? 0) / nowPlaying.progress_total_secs) * 100)}%`,
+                          }}
+                        />
+                      </div>
+                      <span>{formatSeconds(nowPlaying.progress_total_secs)}</span>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
 
               {nowPlaying?.palette_colors.length ? (
                 <div className="flex flex-col items-center gap-2">
