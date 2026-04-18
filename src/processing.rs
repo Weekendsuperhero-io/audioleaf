@@ -240,13 +240,15 @@ pub fn update_brightness_ripple(
     let boosted = overall_energy.sqrt();
 
     // 2. Onset detection — a new ripple spawns when energy jumps sharply
-    let onset_threshold = 0.12;
-    let is_onset = boosted > prev_max[0] + onset_threshold && boosted > 0.15;
-    // Smooth tracking envelope (fast attack, slower release)
+    let onset_threshold = 0.08;
+    let is_onset = boosted > prev_max[0] + onset_threshold && boosted > 0.10;
+    // Envelope: fast attack, fast release so it drops between beats
+    // At 0.55 per frame (~5.3 fps), halves in ~250ms — a 120bpm kick
+    // (500ms apart) easily clears the threshold again.
     if boosted > prev_max[0] {
         prev_max[0] = prev_max[0] * 0.4 + boosted * 0.6;
     } else {
-        prev_max[0] = prev_max[0] * 0.85 + boosted * 0.15;
+        prev_max[0] *= 0.55;
     }
 
     // 3. Propagate the ripple field outward — wavefront travels from panel 0 → N
