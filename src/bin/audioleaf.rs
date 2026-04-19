@@ -1472,6 +1472,21 @@ fn detect_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
     if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
         return Some("image/webp");
     }
+    // BMP
+    if bytes.starts_with(b"BM") && bytes.len() > 14 {
+        return Some("image/bmp");
+    }
+    // TIFF (little-endian II or big-endian MM)
+    if bytes.len() >= 4
+        && ((bytes[0..2] == [0x49, 0x49] && bytes[2..4] == [0x2A, 0x00])
+            || (bytes[0..2] == [0x4D, 0x4D] && bytes[2..4] == [0x00, 0x2A]))
+    {
+        return Some("image/tiff");
+    }
+    // GIF
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        return Some("image/gif");
+    }
     None
 }
 
