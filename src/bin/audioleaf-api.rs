@@ -1297,7 +1297,10 @@ fn process_shairport_metadata_stream<R: BufRead>(
             Ok(XmlEvent::Eof) => return Ok(()),
             Ok(_) => {}
             Err(err) => {
-                return Err(format!("Metadata XML parse error: {err}"));
+                // Non-fatal: the pipe can be joined mid-stream, producing
+                // orphaned close tags. Reset cursor and keep reading.
+                eprintln!("WARNING: metadata XML parse error (continuing): {err}");
+                cur = Cursor::default();
             }
         }
     }
@@ -1314,12 +1317,17 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
 
     #[cfg(debug_assertions)]
     {
-        let preview = payload_text
-            .as_deref()
-            .or_else(|| std::str::from_utf8(&payload).ok())
-            .unwrap_or("<binary>");
+        let preview = if let Some(ref text) = payload_text {
+            text.clone()
+        } else if payload.len() <= 8 {
+            format!("bytes={:?}", &payload)
+        } else if let Ok(s) = std::str::from_utf8(&payload) {
+            s[..s.len().min(80)].to_string()
+        } else {
+            format!("<binary {} bytes>", payload.len())
+        };
         eprintln!(
-            "META {}/{} len={} payload={:.80}",
+            "META {}/{} len={} {}",
             item_type,
             code,
             payload.len(),
@@ -1337,13 +1345,21 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
             "asul" => guard.track.stream_url = payload_text,
             "astm" => guard.track.duration_ms = dmap_payload_u64(&payload),
             "asdk" => guard.track.song_data_kind = dmap_payload_u32(&payload),
-            // caps = player state: 2=stopped, 3=paused, 4=playing
+            // caps = DACP player state byte.
+            // Mapping varies across implementations (some use 3=playing, others 4=playing).
+            // Treat any value >= 2 as "active" — rely on prsm/pfls/paus for play vs pause.
             "caps" => {
-                guard.playback_state = match dmap_payload_u32(&payload) {
-                    Some(4) => PlaybackState::Playing,
-                    Some(3) => PlaybackState::Paused,
-                    _ => PlaybackState::Stopped,
-                };
+                if let Some(v) = dmap_payload_u32(&payload) {
+                    if v >= 2 {
+                        // Don't downgrade from Playing to Paused based on caps alone —
+                        // only prsm/pfls/paus should toggle between those states.
+                        if guard.playback_state != PlaybackState::Playing {
+                            guard.playback_state = PlaybackState::Playing;
+                        }
+                    } else {
+                        guard.playback_state = PlaybackState::Stopped;
+                    }
+                }
             }
             _ => {}
         },
