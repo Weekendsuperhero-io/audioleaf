@@ -1,6 +1,5 @@
 use crate::{constants, ssdp, utils};
 use anyhow::{Result, bail};
-use clap::Parser;
 use serde::Serialize;
 use std::fs::File;
 use std::{
@@ -9,48 +8,6 @@ use std::{
     path::{Path, PathBuf},
 };
 use toml::{Table, Value};
-
-#[derive(Parser, Debug)]
-#[command(version, about, author, long_about = None)]
-pub struct CliOptions {
-    /// Path to audioleaf's configuration file
-    #[arg(long = "config")]
-    pub config_file_path: Option<PathBuf>,
-
-    /// Path to audioleaf's database of known Nanoleaf devices
-    #[arg(long = "devices")]
-    pub devices_file_path: Option<PathBuf>,
-
-    /// Name of the Nanoleaf device to connect to (e.g. Canvas 2E50)
-    #[arg(short = 'd', long = "device-name")]
-    pub device_name: Option<String>,
-
-    /// Explicitly add a new Nanoleaf device
-    #[arg(short = 'n', long = "new")]
-    pub add_new: bool,
-
-    #[command(subcommand)]
-    pub command: Option<Command>,
-}
-
-#[derive(Parser, Debug)]
-pub enum Command {
-    /// Dump information from device or configuration
-    Dump {
-        #[command(subcommand)]
-        dump_type: DumpType,
-    },
-}
-
-#[derive(Parser, Debug)]
-pub enum DumpType {
-    /// Dump panel layout information from the device
-    Layout,
-    /// Dump available color palettes
-    Palettes,
-    /// Dump device info from /api/v1/ endpoint (no auth required)
-    Info,
-}
 
 #[derive(Copy, Clone, Debug, Default, Serialize)]
 pub enum Axis {

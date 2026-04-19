@@ -33,7 +33,7 @@ use tower_http::{
 };
 
 #[derive(Parser, Debug)]
-#[command(version, about = "Audioleaf HTTP API", author)]
+#[command(version, about = "Audioleaf — Nanoleaf music visualizer", author)]
 struct ApiOptions {
     /// Host interface to bind
     #[arg(long, default_value = "0.0.0.0")]
@@ -1318,13 +1318,11 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
     #[cfg(debug_assertions)]
     {
         let preview = if let Some(ref text) = payload_text {
-            text.clone()
+            format!("\"{}\"", text)
         } else if payload.len() <= 8 {
             format!("bytes={:?}", &payload)
-        } else if let Ok(s) = std::str::from_utf8(&payload) {
-            s[..s.len().min(80)].to_string()
         } else {
-            format!("<binary {} bytes>", payload.len())
+            format!("<{} bytes>", payload.len())
         };
         eprintln!(
             "META {}/{} len={} {}",
