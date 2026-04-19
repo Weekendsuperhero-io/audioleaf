@@ -50,8 +50,6 @@ pub enum DumpType {
     Palettes,
     /// Dump device info from /api/v1/ endpoint (no auth required)
     Info,
-    /// Show graphical panel layout visualization
-    LayoutGraphical,
 }
 
 #[derive(Copy, Clone, Debug, Default, Serialize)]

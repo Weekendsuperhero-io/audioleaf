@@ -286,3 +286,9 @@ export const api = {
 };
 
 export const apiAssetUrl = apiPath;
+
+export function apiWsUrl(path: string): string {
+  const base = API_BASE_URL || window.location.origin;
+  const wsBase = base.replace(/^http/, "ws");
+  return `${wsBase}${path}`;
+}

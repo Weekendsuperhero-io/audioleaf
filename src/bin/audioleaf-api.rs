@@ -2,7 +2,10 @@ use anyhow::Result;
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, State},
+    extract::{
+        Path, State,
+        ws::{Message, WebSocket, WebSocketUpgrade},
+    },
     http::{StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -24,7 +27,10 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::task::JoinError;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::{
+    cors::{Any, CorsLayer},
+    services::{ServeDir, ServeFile},
+};
 
 #[derive(Parser, Debug)]
 #[command(version, about = "Audioleaf HTTP API", author)]
@@ -513,6 +519,7 @@ async fn main() -> Result<()> {
         .route("/api/now-playing/artwork", get(get_now_playing_artwork))
         .route("/api/now-playing/settings", put(put_now_playing_settings))
         .route("/api/visualizer/preview", get(get_visualizer_preview))
+        .route("/api/visualizer/ws", get(visualizer_ws))
         .route("/api/visualizer/status", get(get_visualizer_status))
         .route("/api/audio/backends", get(get_audio_backends))
         .route("/api/devices", get(get_devices))
@@ -528,13 +535,28 @@ async fn main() -> Result<()> {
                 .allow_headers(Any),
         );
 
+    // Serve the built frontend from web/dist/ (or AUDIOLEAF_FRONTEND_DIR override).
+    // Falls back to index.html for client-side SPA routing.
+    let frontend_dir =
+        std::env::var("AUDIOLEAF_FRONTEND_DIR").unwrap_or_else(|_| "./web/dist".to_string());
+    let frontend_path = std::path::Path::new(&frontend_dir);
+    let app = if frontend_path.is_dir() {
+        let index = format!("{}/index.html", frontend_dir);
+        app.fallback_service(ServeDir::new(&frontend_dir).fallback(ServeFile::new(index)))
+    } else {
+        app
+    };
+
     let addr: SocketAddr = format!("{}:{}", options.host, options.port).parse()?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
     println!(
         "Audioleaf API listening on http://{}",
         listener.local_addr()?
     );
-    axum::serve(listener, app).await?;
+    if frontend_path.is_dir() {
+        println!("Serving frontend from {}", frontend_dir);
+    }
+    axum::serve(listener, app.into_make_service()).await?;
     Ok(())
 }
 
@@ -1019,6 +1041,40 @@ async fn get_visualizer_preview(
     }))
 }
 
+async fn visualizer_ws(ws: WebSocketUpgrade, State(state): State<ApiState>) -> impl IntoResponse {
+    ws.on_upgrade(|socket| handle_visualizer_ws(socket, state))
+}
+
+async fn handle_visualizer_ws(mut socket: WebSocket, state: ApiState) {
+    let mut interval = tokio::time::interval(Duration::from_millis(100));
+    let mut last_frame: HashMap<u16, [u8; 3]> = HashMap::new();
+    loop {
+        interval.tick().await;
+        let Ok(Some(runtime)) = current_live_visualizer(&state) else {
+            continue;
+        };
+        let frame = latest_panel_colors(&runtime);
+        if frame == last_frame {
+            continue;
+        }
+        last_frame = frame.clone();
+        let mut colors: Vec<VisualizerPreviewPanelColor> = frame
+            .iter()
+            .map(|(id, rgb)| VisualizerPreviewPanelColor {
+                panel_id: *id,
+                rgb: *rgb,
+            })
+            .collect();
+        colors.sort_by_key(|c| c.panel_id);
+        let Ok(msg) = serde_json::to_string(&colors) else {
+            continue;
+        };
+        if socket.send(Message::Text(msg.into())).await.is_err() {
+            break;
+        }
+    }
+}
+
 async fn get_visualizer_status(
     State(state): State<ApiState>,
 ) -> ApiResult<VisualizerStatusResponse> {
@@ -1255,6 +1311,21 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
     guard.reader_running = true;
     guard.last_error = None;
     guard.updated_at_ms = Some(now_unix_ms());
+
+    #[cfg(debug_assertions)]
+    {
+        let preview = payload_text
+            .as_deref()
+            .or_else(|| std::str::from_utf8(&payload).ok())
+            .unwrap_or("<binary>");
+        eprintln!(
+            "META {}/{} len={} payload={:.80}",
+            item_type,
+            code,
+            payload.len(),
+            preview
+        );
+    }
 
     match item_type {
         "core" => match code {

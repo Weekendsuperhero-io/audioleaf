@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import {
   api,
   apiAssetUrl,
+  apiWsUrl,
   type AudioBackendsResponse,
   type ConfigResponse,
   type DeviceInfoResponse,
@@ -386,37 +387,46 @@ function App() {
       return;
     }
 
+    // Fetch device name once, then stream colors via WebSocket
     let cancelled = false;
-    let timerId: number | undefined;
-    const pollPreview = async () => {
-      try {
-        const preview = await api.visualizerPreview();
-        if (cancelled) {
-          return;
-        }
+    api.visualizerPreview().then((preview) => {
+      if (!cancelled) {
         setLivePreviewDeviceName(preview.device?.name ?? null);
-        setLivePreviewColorsByPanel(
-          Object.fromEntries(preview.panel_colors.map((entry) => [entry.panel_id, entry.rgb])),
-        );
-      } catch {
-        if (!cancelled) {
-          setLivePreviewColorsByPanel({});
-          setLivePreviewDeviceName(null);
-        }
-      } finally {
-        if (!cancelled) {
-          timerId = window.setTimeout(() => void pollPreview(), 180);
-        }
       }
-    };
+    }).catch(() => {});
 
-    void pollPreview();
+    let ws: WebSocket | null = null;
+    let reconnectTimer: number | undefined;
+
+    function connect() {
+      ws = new WebSocket(apiWsUrl("/api/visualizer/ws"));
+      ws.onmessage = (event) => {
+        try {
+          const colors: Array<{ panel_id: number; rgb: [number, number, number] }> =
+            JSON.parse(event.data);
+          setLivePreviewColorsByPanel(
+            Object.fromEntries(colors.map((c) => [c.panel_id, c.rgb])),
+          );
+        } catch { /* ignore parse errors */ }
+      };
+      ws.onclose = () => {
+        if (!cancelled) {
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+      ws.onerror = () => {
+        ws?.close();
+      };
+    }
+
+    connect();
 
     return () => {
       cancelled = true;
-      if (timerId !== undefined) {
-        window.clearTimeout(timerId);
+      if (reconnectTimer !== undefined) {
+        window.clearTimeout(reconnectTimer);
       }
+      ws?.close();
     };
   }, [showLivePreview]);
 
