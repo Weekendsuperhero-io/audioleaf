@@ -1337,6 +1337,14 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
             "asul" => guard.track.stream_url = payload_text,
             "astm" => guard.track.duration_ms = dmap_payload_u64(&payload),
             "asdk" => guard.track.song_data_kind = dmap_payload_u32(&payload),
+            // caps = player state: 2=stopped, 3=paused, 4=playing
+            "caps" => {
+                guard.playback_state = match dmap_payload_u32(&payload) {
+                    Some(4) => PlaybackState::Playing,
+                    Some(3) => PlaybackState::Paused,
+                    _ => PlaybackState::Stopped,
+                };
+            }
             _ => {}
         },
         "ssnc" => match code {
@@ -1367,7 +1375,13 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
                 guard.clear_session_data();
             }
             // Progress: "start/current/end" RTP timestamps at 44100 Hz
-            "prgr" => guard.progress_rtp = parse_prgr(&payload),
+            "prgr" => {
+                guard.progress_rtp = parse_prgr(&payload);
+                // Progress updates only arrive during active playback
+                if guard.progress_rtp.is_some() {
+                    guard.playback_state = PlaybackState::Playing;
+                }
+            }
             // Volume: "airplay_vol,actual_vol,lowest,highest" in dB
             "pvol" => guard.volume_db = parse_pvol(&payload),
             // Metadata bundle boundaries (informational — no action needed)
