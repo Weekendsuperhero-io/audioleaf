@@ -10,16 +10,22 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
+#[cfg(target_os = "linux")]
 use base64::Engine;
 use clap::Parser;
 use hashbrown::HashMap;
 use parking_lot::Mutex;
+#[cfg(target_os = "linux")]
 use quick_xml::Reader as XmlReader;
+#[cfg(target_os = "linux")]
 use quick_xml::events::Event as XmlEvent;
 use serde::{Deserialize, Serialize};
+#[cfg(target_os = "linux")]
 use std::{
     fs::OpenOptions,
     io::{BufRead, BufReader},
+};
+use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
@@ -80,7 +86,9 @@ struct LiveVisualizerRecoveryState {
     healthy_ping_streak: u8,
 }
 
+#[cfg(target_os = "linux")]
 const DEFAULT_SHAIRPORT_METADATA_PIPE: &str = "/tmp/shairport-sync-metadata";
+#[cfg(target_os = "linux")]
 const NOW_PLAYING_RETRY_DELAY: Duration = Duration::from_secs(3);
 const LIVE_VISUALIZER_WATCHDOG_INTERVAL: Duration = Duration::from_secs(2);
 const LIVE_VISUALIZER_RESTART_FAILURE_LIMIT: u32 = 3;
@@ -179,6 +187,7 @@ impl NowPlayingRuntimeState {
         }
     }
 
+    #[cfg(target_os = "linux")]
     fn clear_session_data(&mut self) {
         self.track = NowPlayingTrackData::default();
         self.palette_colors.clear();
@@ -469,11 +478,14 @@ async fn main() -> Result<()> {
     } else {
         audioleaf::config::Config::new(None, None)
     };
+    #[cfg(target_os = "linux")]
     let metadata_pipe_path = std::env::var("AUDIOLEAF_SHAIRPORT_METADATA_PIPE")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| DEFAULT_SHAIRPORT_METADATA_PIPE.to_string());
+    #[cfg(not(target_os = "linux"))]
+    let metadata_pipe_path = String::new();
 
     let state = ApiState {
         config_file_path: options.config_file_path,
@@ -496,10 +508,6 @@ async fn main() -> Result<()> {
     }
     start_now_playing_reader(&state);
     start_live_visualizer_watchdog(&state);
-    println!(
-        "Now-playing metadata reader initialized (pipe: {}).",
-        metadata_pipe_path
-    );
 
     let app = Router::new()
         .route("/api/health", get(get_health))
@@ -1116,6 +1124,61 @@ fn current_now_playing_snapshot(state: &ApiState) -> Result<NowPlayingResponse, 
     Ok(guard.snapshot())
 }
 
+#[cfg(target_os = "macos")]
+fn start_now_playing_reader(state: &ApiState) {
+    let state = state.clone();
+    thread::spawn(move || {
+        use media_remote::{NowPlayingInfo, NowPlayingPerl, Subscription};
+        use std::sync::RwLockReadGuard;
+
+        let now_playing = NowPlayingPerl::new();
+        let state_clone = state.clone();
+        now_playing.subscribe(move |guard: RwLockReadGuard<'_, Option<NowPlayingInfo>>| {
+            let Some(info) = guard.as_ref() else { return };
+            let mut np = state_clone.now_playing.lock();
+            np.reader_running = true;
+            np.last_error = None;
+            np.updated_at_ms = Some(now_unix_ms());
+
+            np.track.title = info.title.clone();
+            np.track.artist = info.artist.clone();
+            np.track.album = info.album.clone();
+            np.playback_state = match info.is_playing {
+                Some(true) => PlaybackState::Playing,
+                Some(false) => PlaybackState::Paused,
+                None => PlaybackState::Stopped,
+            };
+            if let (Some(elapsed), Some(duration)) = (info.elapsed_time, info.duration) {
+                let start = 0u64;
+                let current = (elapsed * 44100.0) as u64;
+                let end = (duration * 44100.0) as u64;
+                np.progress_rtp = Some((start, current, end));
+            } else {
+                np.progress_rtp = None;
+            }
+            np.track.duration_ms = info.duration.map(|d| (d * 1000.0) as u64);
+
+            if let Some(ref cover) = info.album_cover {
+                let mut buf: std::io::Cursor<Vec<u8>> = std::io::Cursor::new(Vec::new());
+                if cover.write_to(&mut buf, image::ImageFormat::Jpeg).is_ok() {
+                    let bytes = buf.into_inner();
+                    let colors = extract_prominent_colors(&bytes).unwrap_or_default();
+                    np.artwork_mime_type = Some("image/jpeg".to_string());
+                    np.artwork_bytes = Some(bytes);
+                    np.artwork_generation = np.artwork_generation.saturating_add(1);
+                    np.palette_colors = colors;
+                }
+            }
+        });
+
+        // Block to keep the subscriber alive
+        loop {
+            thread::sleep(Duration::from_secs(3600));
+        }
+    });
+}
+
+#[cfg(target_os = "linux")]
 fn start_now_playing_reader(state: &ApiState) {
     let state = state.clone();
     thread::spawn(move || {
@@ -1199,6 +1262,7 @@ async fn run_live_visualizer_watchdog_tick(state: &ApiState) -> Result<(), ApiEr
 /// Large payloads (cover art) span many base64 lines before `</data></item>`.
 /// This parser uses quick-xml to handle all shapes robustly (inline or multi-line,
 /// with or without `<data>`).
+#[cfg(target_os = "linux")]
 fn process_shairport_metadata_stream<R: BufRead>(
     state: &ApiState,
     reader: R,
@@ -1306,6 +1370,7 @@ fn process_shairport_metadata_stream<R: BufRead>(
     }
 }
 
+#[cfg(target_os = "linux")]
 fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, payload: Vec<u8>) {
     let payload_text = payload_bytes_to_string(&payload);
     let mut maybe_palette_to_apply: Option<Vec<[u8; 3]>> = None;
@@ -1412,6 +1477,7 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
     }
 }
 
+#[cfg(target_os = "linux")]
 fn dmap_payload_u32(payload: &[u8]) -> Option<u32> {
     match payload.len() {
         1 => Some(payload[0] as u32),
@@ -1423,6 +1489,7 @@ fn dmap_payload_u32(payload: &[u8]) -> Option<u32> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn dmap_payload_u64(payload: &[u8]) -> Option<u64> {
     match payload.len() {
         1..=4 => dmap_payload_u32(payload).map(|v| v as u64),
@@ -1431,6 +1498,7 @@ fn dmap_payload_u64(payload: &[u8]) -> Option<u64> {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn parse_prgr(payload: &[u8]) -> Option<(u64, u64, u64)> {
     let text = std::str::from_utf8(payload).ok()?;
     let mut parts = text.split('/');
@@ -1440,12 +1508,14 @@ fn parse_prgr(payload: &[u8]) -> Option<(u64, u64, u64)> {
     Some((start, current, end))
 }
 
+#[cfg(target_os = "linux")]
 fn parse_pvol(payload: &[u8]) -> Option<f32> {
     let text = std::str::from_utf8(payload).ok()?;
     let first = text.split(',').next()?.trim();
     first.parse().ok()
 }
 
+#[cfg(target_os = "linux")]
 fn payload_bytes_to_string(payload: &[u8]) -> Option<String> {
     if payload.is_empty() {
         return None;
@@ -1457,11 +1527,13 @@ fn payload_bytes_to_string(payload: &[u8]) -> Option<String> {
     if value.is_empty() { None } else { Some(value) }
 }
 
+#[cfg(target_os = "linux")]
 fn decode_fourcc(hex_value: &str) -> Option<String> {
     let raw = u32::from_str_radix(hex_value, 16).ok()?.to_be_bytes();
     Some(raw.iter().map(|byte| *byte as char).collect())
 }
 
+#[cfg(target_os = "linux")]
 fn detect_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         return Some("image/jpeg");

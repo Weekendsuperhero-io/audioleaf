@@ -35,8 +35,7 @@ toml = "1"
 tower-http = { version = "0.6.8", features = ["cors", "fs"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2 = "0.6"
-objc2-foundation = { version = "0.3", features = ["NSString", "NSData"] }
+media-remote = "0.3"
 
 [profile.dev]
 panic = "abort"
