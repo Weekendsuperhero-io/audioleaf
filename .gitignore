@@ -7,3 +7,6 @@ web/*.tsbuildinfo
 .claude
 *.wav
 .pnpm-store
+
+# Stakpak session files
+.stakpak/session*

@@ -237,7 +237,59 @@ effect = "Spectrum"        # "Spectrum", "EnergyWave", or "Pulse"
 3. In the **Recording** tab, set audioleaf's input to your media player's monitor
 4. Set `audio_backend` in config.toml to match
 
-### Raspberry Pi (ALSA Loopback, Recommended)
+### Raspberry Pi — Container (Recommended)
+
+Ship audioleaf, `nqptp`, and `shairport-sync` (with AirPlay 2) as a single
+prebuilt OCI image. New releases arrive via `podman pull`; nothing is built on
+the Pi.
+
+1. **One-time host prep** — load the ALSA loopback kernel module (the only
+   step that cannot be containerized):
+   ```bash
+   echo snd-aloop | sudo tee /etc/modules-load.d/snd-aloop.conf
+   echo "options snd-aloop id=Loopback index=2 pcm_substreams=8" \
+     | sudo tee /etc/modprobe.d/snd-aloop.conf
+   sudo modprobe snd-aloop
+   ```
+2. **Install Podman**:
+   ```bash
+   sudo apt-get install -y podman podman-compose
+   ```
+3. **Drop in the compose file** (from this repo, `docker/compose.yaml`) into a
+   working directory of your choice — for example `/etc/audioleaf`:
+   ```bash
+   sudo mkdir -p /etc/audioleaf/config
+   sudo curl -fsSL -o /etc/audioleaf/compose.yaml \
+     https://raw.githubusercontent.com/Weekendsuperhero/audioleaf/main/docker/compose.yaml
+   ```
+4. **Start it**:
+   ```bash
+   cd /etc/audioleaf && sudo podman compose up -d
+   ```
+5. Open `http://<pi-ip>:8787`, pair your Nanoleaf devices, and AirPlay to
+   "Audioleaf Pi" from any iOS/macOS client.
+6. **(Optional) Run on boot via systemd** — copy
+   `docker/audioleaf.service` to `/etc/systemd/system/audioleaf.service`,
+   then:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable --now audioleaf
+   ```
+
+Update to a new release:
+```bash
+cd /etc/audioleaf && sudo podman compose pull && sudo podman compose up -d
+```
+
+Config (`config.toml`, `nl_devices.toml`) lives in `/etc/audioleaf/config/`
+and survives container rebuilds.
+
+### Raspberry Pi — Bare-metal (Legacy)
+
+If you'd rather run native binaries, the legacy installer
+(`install_share_port_sync.sh`) builds `nqptp` and `shairport-sync` from source
+and configures systemd units directly on the host. Slower to install and
+harder to update, but doesn't require Podman.
 
 For AirPlay + live visualizer on Raspberry Pi, use ALSA loopback and keep audioleaf on
 `audio_backend = "default"` so ALSA routing is the single source of truth.

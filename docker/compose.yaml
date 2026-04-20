@@ -1,0 +1,23 @@
+# Podman/Docker compose for audioleaf on Raspberry Pi.
+#
+# Pi prerequisites (one-time, host side):
+#   echo snd-aloop | sudo tee /etc/modules-load.d/snd-aloop.conf
+#   echo "options snd-aloop id=Loopback index=2 pcm_substreams=8" \
+#     | sudo tee /etc/modprobe.d/snd-aloop.conf
+#   sudo modprobe snd-aloop
+#
+# Run:
+#   podman compose -f docker/compose.yaml up -d
+
+services:
+  audioleaf:
+    image: ghcr.io/weekendsuperhero/audioleaf:latest
+    container_name: audioleaf
+    network_mode: host
+    restart: unless-stopped
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      - audio
+    volumes:
+      - ${AUDIOLEAF_CONFIG_DIR:-./config}:/root/.config/audioleaf
