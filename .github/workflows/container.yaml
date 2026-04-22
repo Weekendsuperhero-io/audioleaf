@@ -22,9 +22,6 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ !github.ref_protected }}
 
-env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/audioleaf
-
 jobs:
   build:
     name: Build (${{ matrix.platform }})
@@ -43,6 +40,9 @@ jobs:
             runner: ubuntu-24.04-arm
 
     steps:
+      - name: Resolve image name (lowercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/audioleaf" >> "$GITHUB_ENV"
+
       - name: Prepare platform pair
         id: platform
         run: |
@@ -107,6 +107,9 @@ jobs:
       packages: write
       id-token: write
     steps:
+      - name: Resolve image name (lowercase)
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/audioleaf" >> "$GITHUB_ENV"
+
       - name: Download digests
         uses: actions/download-artifact@v4
         with:
