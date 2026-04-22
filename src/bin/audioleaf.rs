@@ -637,6 +637,15 @@ async fn put_visualizer_palette(
     let config = update_runtime_config(&state, |config| {
         config.visualizer_config.colors = Some(colors.clone());
     })?;
+    // Explicit palette pick wins over artwork-drive. If we left it enabled,
+    // the next artwork update would silently override the user's choice.
+    {
+        let mut guard = state.now_playing.lock();
+        if guard.drive_visualizer_palette {
+            guard.drive_visualizer_palette = false;
+            guard.updated_at_ms = Some(now_unix_ms());
+        }
+    }
     let paths = resolve_paths(&state)?;
     send_live_message_with_recovery(
         &state,
@@ -830,27 +839,54 @@ async fn put_now_playing_settings(
     State(state): State<ApiState>,
     Json(payload): Json<NowPlayingSettingsUpdateRequest>,
 ) -> ApiResult<NowPlayingResponse> {
-    if payload.drive_visualizer_palette.is_none() {
+    let Some(enabled) = payload.drive_visualizer_palette else {
         return Err(ApiError::bad_request(
             "Request must include drive_visualizer_palette.",
         ));
+    };
+
+    enum PaletteAction {
+        ApplyArtwork(Vec<[u8; 3]>),
+        RestoreConfig,
+        None,
     }
 
-    let maybe_palette_to_apply = {
+    let action = {
         let mut guard = state.now_playing.lock();
-        if let Some(enabled) = payload.drive_visualizer_palette {
-            guard.drive_visualizer_palette = enabled;
-        }
+        let was_enabled = guard.drive_visualizer_palette;
+        guard.drive_visualizer_palette = enabled;
         guard.updated_at_ms = Some(now_unix_ms());
-        if guard.drive_visualizer_palette && !guard.palette_colors.is_empty() {
-            Some(guard.palette_colors.clone())
+
+        if enabled && !guard.palette_colors.is_empty() {
+            PaletteAction::ApplyArtwork(guard.palette_colors.clone())
+        } else if was_enabled && !enabled {
+            PaletteAction::RestoreConfig
         } else {
-            None
+            PaletteAction::None
         }
     };
 
-    if let Some(colors) = maybe_palette_to_apply {
-        apply_now_playing_palette_to_live_runtime(&state, colors);
+    match action {
+        PaletteAction::ApplyArtwork(colors) => {
+            apply_now_playing_palette_to_live_runtime(&state, colors);
+        }
+        PaletteAction::RestoreConfig => {
+            // Drive just turned off — re-assert the configured palette so the
+            // visualizer doesn't linger on the last artwork colors. SetPalette
+            // clears brightness and sends a black frame in visualizer.rs.
+            let config_colors = get_runtime_config_clone(&state)?
+                .visualizer_config
+                .colors
+                .unwrap_or_default();
+            if !config_colors.is_empty() {
+                send_live_message_with_recovery(
+                    &state,
+                    audioleaf::visualizer::VisualizerMsg::SetPalette(config_colors),
+                )
+                .await?;
+            }
+        }
+        PaletteAction::None => {}
     }
 
     let snapshot = current_now_playing_snapshot(&state)?;
@@ -1135,39 +1171,65 @@ fn start_now_playing_reader(state: &ApiState) {
         let state_clone = state.clone();
         now_playing.subscribe(move |guard: RwLockReadGuard<'_, Option<NowPlayingInfo>>| {
             let Some(info) = guard.as_ref() else { return };
-            let mut np = state_clone.now_playing.lock();
-            np.reader_running = true;
-            np.last_error = None;
-            np.updated_at_ms = Some(now_unix_ms());
 
-            np.track.title = info.title.clone();
-            np.track.artist = info.artist.clone();
-            np.track.album = info.album.clone();
-            np.playback_state = match info.is_playing {
-                Some(true) => PlaybackState::Playing,
-                Some(false) => PlaybackState::Paused,
-                None => PlaybackState::Stopped,
-            };
-            if let (Some(elapsed), Some(duration)) = (info.elapsed_time, info.duration) {
-                let start = 0u64;
-                let current = (elapsed * 44100.0) as u64;
-                let end = (duration * 44100.0) as u64;
-                np.progress_rtp = Some((start, current, end));
-            } else {
-                np.progress_rtp = None;
-            }
-            np.track.duration_ms = info.duration.map(|d| (d * 1000.0) as u64);
+            let palette_to_apply: Option<Vec<[u8; 3]>> = {
+                let mut np = state_clone.now_playing.lock();
+                np.reader_running = true;
+                np.last_error = None;
+                np.updated_at_ms = Some(now_unix_ms());
 
-            if let Some(ref cover) = info.album_cover {
-                let mut buf: std::io::Cursor<Vec<u8>> = std::io::Cursor::new(Vec::new());
-                if cover.write_to(&mut buf, image::ImageFormat::Jpeg).is_ok() {
-                    let bytes = buf.into_inner();
-                    let colors = extract_prominent_colors(&bytes).unwrap_or_default();
-                    np.artwork_mime_type = Some("image/jpeg".to_string());
-                    np.artwork_bytes = Some(bytes);
-                    np.artwork_generation = np.artwork_generation.saturating_add(1);
-                    np.palette_colors = colors;
+                // Detect track change against previous state before overwriting.
+                // On change, drop stale artwork-derived state so the old track's
+                // colors don't linger if the new track arrives without a cover.
+                let track_changed = np.track.title != info.title
+                    || np.track.artist != info.artist
+                    || np.track.album != info.album;
+
+                np.track.title = info.title.clone();
+                np.track.artist = info.artist.clone();
+                np.track.album = info.album.clone();
+                np.playback_state = match info.is_playing {
+                    Some(true) => PlaybackState::Playing,
+                    Some(false) => PlaybackState::Paused,
+                    None => PlaybackState::Stopped,
+                };
+                if let (Some(elapsed), Some(duration)) = (info.elapsed_time, info.duration) {
+                    let start = 0u64;
+                    let current = (elapsed * 44100.0) as u64;
+                    let end = (duration * 44100.0) as u64;
+                    np.progress_rtp = Some((start, current, end));
+                } else {
+                    np.progress_rtp = None;
                 }
+                np.track.duration_ms = info.duration.map(|d| (d * 1000.0) as u64);
+
+                if track_changed {
+                    np.palette_colors.clear();
+                    np.artwork_bytes = None;
+                    np.artwork_mime_type = None;
+                    np.artwork_generation = np.artwork_generation.saturating_add(1);
+                }
+
+                let mut colors_to_push: Option<Vec<[u8; 3]>> = None;
+                if let Some(ref cover) = info.album_cover {
+                    let mut buf: std::io::Cursor<Vec<u8>> = std::io::Cursor::new(Vec::new());
+                    if cover.write_to(&mut buf, image::ImageFormat::Jpeg).is_ok() {
+                        let bytes = buf.into_inner();
+                        let colors = extract_prominent_colors(&bytes).unwrap_or_default();
+                        np.artwork_mime_type = Some("image/jpeg".to_string());
+                        np.artwork_bytes = Some(bytes);
+                        np.artwork_generation = np.artwork_generation.saturating_add(1);
+                        np.palette_colors = colors.clone();
+                        if np.drive_visualizer_palette && !colors.is_empty() {
+                            colors_to_push = Some(colors);
+                        }
+                    }
+                }
+                colors_to_push
+            };
+
+            if let Some(colors) = palette_to_apply {
+                apply_now_playing_palette_to_live_runtime(&state_clone, colors);
             }
         });
 
