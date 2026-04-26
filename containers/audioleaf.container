@@ -26,6 +26,11 @@ GroupAdd=audio
 Volume=/etc/audioleaf/config:/root/.config/audioleaf
 # Pull updated image when 'systemctl start' fires after upstream tags move.
 AutoUpdate=registry
+# Uncomment to dump every parsed shairport metadata item to journalctl
+# (decoded fourcc/code, length, UTF-8 or hex preview). After editing:
+#   sudo systemctl daemon-reload && sudo systemctl restart audioleaf
+# Then: journalctl -fu audioleaf | grep META
+#Environment=AUDIOLEAF_LOG_METADATA=1
 
 [Service]
 Restart=on-failure

@@ -164,6 +164,10 @@ struct NowPlayingRuntimeState {
     playback_state: PlaybackState,
     /// Progress from "prgr": RTP timestamps at 44100 fps as (start, current, end)
     progress_rtp: Option<(u64, u64, u64)>,
+    /// Wall-clock unix-ms timestamp when `progress_rtp` was last updated.
+    /// Used to extrapolate elapsed time between sparse `prgr` events
+    /// (shairport only emits one at stream start + on flushes).
+    progress_received_at_ms: Option<u64>,
     /// AirPlay volume in dB (0.0 to -30.0, -144.0 = mute)
     volume_db: Option<f32>,
 }
@@ -183,6 +187,7 @@ impl NowPlayingRuntimeState {
             updated_at_ms: None,
             playback_state: PlaybackState::default(),
             progress_rtp: None,
+            progress_received_at_ms: None,
             volume_db: None,
         }
     }
@@ -195,14 +200,27 @@ impl NowPlayingRuntimeState {
         self.artwork_mime_type = None;
         self.artwork_generation = self.artwork_generation.saturating_add(1);
         self.progress_rtp = None;
+        self.progress_received_at_ms = None;
         self.updated_at_ms = Some(now_unix_ms());
     }
 
     /// Returns (elapsed_secs, total_secs) derived from RTP timestamps at 44100 Hz.
+    /// While `playback_state == Playing`, the elapsed value is extrapolated
+    /// forward from `progress_received_at_ms` since shairport only emits
+    /// `prgr` at stream start / flushes — the raw `current` would otherwise
+    /// stay frozen at whatever shairport last reported.
     fn progress_seconds(&self) -> Option<(f64, f64)> {
         let (start, current, end) = self.progress_rtp?;
-        let elapsed = current.wrapping_sub(start) as f64 / 44100.0;
+        let raw_elapsed = current.wrapping_sub(start) as f64 / 44100.0;
         let total = end.wrapping_sub(start) as f64 / 44100.0;
+        let elapsed = match (self.progress_received_at_ms, &self.playback_state) {
+            (Some(anchor_ms), PlaybackState::Playing) => {
+                let now_ms = now_unix_ms();
+                let drift = now_ms.saturating_sub(anchor_ms) as f64 / 1000.0;
+                (raw_elapsed + drift).min(total)
+            }
+            _ => raw_elapsed,
+        };
         Some((elapsed, total))
     }
 
@@ -1198,8 +1216,10 @@ fn start_now_playing_reader(state: &ApiState) {
                     let current = (elapsed * 44100.0) as u64;
                     let end = (duration * 44100.0) as u64;
                     np.progress_rtp = Some((start, current, end));
+                    np.progress_received_at_ms = Some(now_unix_ms());
                 } else {
                     np.progress_rtp = None;
+                    np.progress_received_at_ms = None;
                 }
                 np.track.duration_ms = info.duration.map(|d| (d * 1000.0) as u64);
 
@@ -1442,21 +1462,10 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
     guard.last_error = None;
     guard.updated_at_ms = Some(now_unix_ms());
 
-    #[cfg(debug_assertions)]
-    {
-        let preview = if let Some(ref text) = payload_text {
-            format!("\"{}\"", text)
-        } else if payload.len() <= 8 {
-            format!("bytes={:?}", &payload)
-        } else {
-            format!("<{} bytes>", payload.len())
-        };
-        eprintln!(
-            "META {}/{} len={} {}",
-            item_type,
-            code,
-            payload.len(),
-            preview
+    if metadata_logging_enabled() {
+        log_metadata_event(
+            &format!("{}/{} len={}", item_type, code, payload.len()),
+            Some(&payload),
         );
     }
 
@@ -1515,12 +1524,18 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
                 guard.playback_state = PlaybackState::Stopped;
                 guard.clear_session_data();
             }
-            // Progress: "start/current/end" RTP timestamps at 44100 Hz
+            // Progress: "start/current/end" RTP timestamps at 44100 Hz.
+            // shairport sends this at stream start and on flush events; we
+            // anchor wall-clock here so the snapshot can extrapolate elapsed.
             "prgr" => {
-                guard.progress_rtp = parse_prgr(&payload);
-                // Progress updates only arrive during active playback
-                if guard.progress_rtp.is_some() {
+                let parsed = parse_prgr(&payload);
+                guard.progress_rtp = parsed;
+                if parsed.is_some() {
+                    guard.progress_received_at_ms = Some(now_unix_ms());
                     guard.playback_state = PlaybackState::Playing;
+                } else {
+                    guard.progress_received_at_ms = None;
+                    log_metadata_event("WARNING: failed to parse prgr payload", Some(&payload));
                 }
             }
             // Volume: "airplay_vol,actual_vol,lowest,highest" in dB
@@ -1667,6 +1682,47 @@ fn now_unix_ms() -> u64 {
         Ok(duration) => duration.as_millis() as u64,
         Err(_) => 0,
     }
+}
+
+/// True when AUDIOLEAF_LOG_METADATA is set to a truthy value. Cached on first
+/// read — toggling at runtime requires a process restart.
+#[allow(dead_code)] // Only consumed by the Linux shairport-metadata path.
+fn metadata_logging_enabled() -> bool {
+    static FLAG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("AUDIOLEAF_LOG_METADATA")
+            .ok()
+            .map(|v| !matches!(v.as_str(), "" | "0" | "false" | "no"))
+            .unwrap_or(false)
+    })
+}
+
+/// Log an ad-hoc metadata-stream event. Rendering a preview of the payload
+/// (UTF-8 if printable, hex-bytes otherwise, truncated for large blobs).
+/// No-op unless AUDIOLEAF_LOG_METADATA is set.
+#[allow(dead_code)] // Only consumed by the Linux shairport-metadata path.
+fn log_metadata_event(message: &str, payload: Option<&[u8]>) {
+    if !metadata_logging_enabled() {
+        return;
+    }
+    let preview = match payload {
+        None => String::new(),
+        Some([]) => " (empty)".to_string(),
+        Some(bytes) => {
+            let utf8 = std::str::from_utf8(bytes)
+                .ok()
+                .map(|s| s.trim_matches('\0'))
+                .filter(|s| s.chars().all(|c| !c.is_control() || c == '\n' || c == '\t'));
+            if let Some(text) = utf8 {
+                format!(" \"{}\"", text)
+            } else if bytes.len() <= 16 {
+                format!(" bytes={:02x?}", bytes)
+            } else {
+                format!(" <{} bytes>", bytes.len())
+            }
+        }
+    };
+    eprintln!("META {}{}", message, preview);
 }
 
 fn resolve_paths(state: &ApiState) -> Result<PathsResponse, ApiError> {

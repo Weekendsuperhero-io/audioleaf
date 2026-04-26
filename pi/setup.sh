@@ -46,7 +46,7 @@ for arg in "$@"; do
 done
 
 # ---------- helpers ----------
-banner() { printf '\n[%s/8] %s\n' "$1" "$2"; }
+banner() { printf '\n[%s/9] %s\n' "$1" "$2"; }
 log()    { printf '  %s\n' "$*"; }
 warn()   { printf '  WARN: %s\n' "$*" >&2; }
 die()    { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -100,7 +100,10 @@ log "Using compose: ${COMPOSE_CMD[*]}"
 banner 2 "Group memberships"
 if [[ -n "$TARGET_USER" ]]; then
     current_groups="$(id -nG "$TARGET_USER" 2>/dev/null || echo "")"
-    for grp in audio render; do
+    # audio  — ALSA device access for native runs
+    # render — some Pi GPU/audio paths use it
+    # systemd-journal — read system journal without sudo (`journalctl -fu audioleaf`)
+    for grp in audio render systemd-journal; do
         if getent group "$grp" >/dev/null; then
             if [[ " $current_groups " == *" $grp "* ]]; then
                 log "$TARGET_USER already in '$grp'."
@@ -252,8 +255,34 @@ else
     log "Skipped ($([[ $DEPLOY -eq 0 ]] && echo --no-deploy || echo --no-systemd))."
 fi
 
-# ---------- 7. start (when not using systemd) ----------
-banner 7 "Start container"
+# ---------- 7. polkit rule (no-sudo systemctl) ----------
+banner 7 "polkit rule for no-sudo service control"
+if (( ENABLE_SYSTEMD )); then
+    polkit_rules_dir="/etc/polkit-1/rules.d"
+    if [[ -d "$polkit_rules_dir" ]]; then
+        cat >"$polkit_rules_dir/50-audioleaf.rules" <<'POLKIT'
+// Allow members of the 'audio' group to start/stop/restart/enable/disable
+// audioleaf.service without a password prompt or sudo.
+// Installed by audioleaf's pi/setup.sh.
+polkit.addRule(function(action, subject) {
+    if (action.id == "org.freedesktop.systemd1.manage-units" &&
+        action.lookup("unit") == "audioleaf.service" &&
+        subject.isInGroup("audio")) {
+        return polkit.Result.YES;
+    }
+});
+POLKIT
+        chmod 0644 "$polkit_rules_dir/50-audioleaf.rules"
+        log "Installed $polkit_rules_dir/50-audioleaf.rules (audio-group → manage audioleaf.service)."
+    else
+        warn "$polkit_rules_dir not present; skipping. Install 'polkitd' for no-sudo systemctl."
+    fi
+else
+    log "Skipped (--no-systemd: no service to manage)."
+fi
+
+# ---------- 8. start (when not using systemd) ----------
+banner 8 "Start container"
 if (( DEPLOY )) && (( ! ENABLE_SYSTEMD )); then
     ( cd "$CONFIG_DIR" && "${COMPOSE_CMD[@]}" up -d )
     log "Container started via compose."
@@ -263,8 +292,8 @@ else
     log "Started by Quadlet-generated audioleaf.service."
 fi
 
-# ---------- 8. final report ----------
-banner 8 "Done"
+# ---------- 9. final report ----------
+banner 9 "Done"
 host_ip="$(hostname -I 2>/dev/null | awk '{print $1}')"
 host_ip="${host_ip:-<pi-ip>}"
 
@@ -276,10 +305,17 @@ Audioleaf is set up.
   Config dir:    $CONFIG_DIR/config
   Compose file:  $compose_dest
 
-Useful commands:
-  sudo podman logs -f audioleaf
-  sudo systemctl status audioleaf            # if systemd unit installed
-  cd $CONFIG_DIR && sudo ${COMPOSE_CMD[*]} pull && sudo ${COMPOSE_CMD[*]} up -d   # update
+Useful commands (no sudo needed once you've logged out and back in):
+  journalctl -fu audioleaf                   # live logs
+  systemctl status audioleaf                 # service state
+  systemctl restart audioleaf                # restart
+  sudo podman compose -f $CONFIG_DIR/compose.yaml pull   # update image (still needs sudo for podman)
 
-If you added group memberships, log out and log back in for them to apply.
+To enable verbose shairport metadata logging:
+  edit $CONFIG_DIR/audioleaf.container (or /etc/containers/systemd/audioleaf.container)
+  uncomment the AUDIOLEAF_LOG_METADATA line, then
+  sudo systemctl daemon-reload && systemctl restart audioleaf
+  journalctl -fu audioleaf | grep META
+
+If you were just added to new groups, log out and log back in for them to apply.
 EOF
