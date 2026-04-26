@@ -20,10 +20,29 @@ use std::{
 
 const STREAM_ERROR_REPORT_INTERVAL: Duration = Duration::from_secs(10);
 const AUDIO_RECV_TIMEOUT: Duration = Duration::from_millis(250);
+/// Bound on the cpal-callback → visualizer audio queue. Capped so a producer
+/// burst (e.g. AirPlay catching up after a stall) cannot grow memory
+/// unboundedly; the callback drops oldest batches when the consumer falls
+/// behind.
+const AUDIO_TX_CHANNEL_DEPTH: usize = 64;
+/// Initial wait before retrying audio-stream construction after a fault.
+const AUDIO_RESTART_INITIAL_BACKOFF: Duration = Duration::from_millis(250);
+/// Cap on the audio-stream rebuild backoff.
+const AUDIO_RESTART_MAX_BACKOFF: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone, Copy)]
 enum StreamFault {
     DeviceUnavailable,
+}
+
+/// Why the inner audio pump returned to the outer loop.
+enum AudioLoopExit {
+    /// Visualizer was asked to stop (End message). Exit the thread.
+    Done,
+    /// The audio stream went away or the device is unavailable. Drop the
+    /// current cpal stream, sleep with backoff, and try to rebuild — without
+    /// disturbing the Nanoleaf attachment.
+    RebuildAudio,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -323,7 +342,12 @@ impl Visualizer {
                     .fold(f32::NEG_INFINITY, f32::max),
             );
         }
-        let _ = tx.send(samples);
+        // Bounded channel: if the consumer is falling behind, drop this
+        // batch on the floor. cpal callbacks must never block, so send()
+        // is unsafe; and the channel only exposes try_send from the
+        // producer side. Dropping recent samples is acceptable — the
+        // visualizer treats missing audio as silence.
+        let _ = tx.try_send(samples);
     }
 
     /// Creates a closure suitable for CPAL `build_input_stream` callback.
@@ -453,92 +477,24 @@ impl Visualizer {
         thread::spawn(move || {
             panic::register_backtrace_panic_handler();
             Self::set_stream_health(&self.stream_health, StreamHealth::Starting);
-            let (tx_audio, rx_audio) = flume::unbounded();
-            let (tx_stream_fault, rx_stream_fault) = flume::unbounded();
-            let stream_errors = Arc::new(Mutex::new(StreamErrorTelemetry::new()));
-            macro_rules! build_input_stream {
-                ($type:ty) => {
-                    self.audio_stream.device.build_input_stream(
-                        &self.audio_stream.stream_config,
-                        Self::create_data_callback::<$type>(
-                            self.audio_stream.stream_config.channels as usize,
-                            tx_audio.clone(),
-                        ),
-                        {
-                            let tx_stream_fault = tx_stream_fault.clone();
-                            let stream_errors = Arc::clone(&stream_errors);
-                            move |err| {
-                                let err_text = err.to_string();
-                                let kind = Self::classify_stream_error(&err, &err_text);
-                                let mut telemetry = stream_errors.lock();
-                                telemetry.record(kind);
-                                if matches!(kind, StreamErrorKind::DeviceUnavailable) {
-                                    let _ = tx_stream_fault.send(StreamFault::DeviceUnavailable);
-                                }
-                            }
-                        },
-                        None,
-                    )
-                };
-            }
-            let stream_result = match self.audio_stream.sample_format {
-                SampleFormat::I8 => build_input_stream!(i8),
-                SampleFormat::I16 => build_input_stream!(i16),
-                SampleFormat::I32 => build_input_stream!(i32),
-                SampleFormat::I64 => build_input_stream!(i64),
-                SampleFormat::U8 => build_input_stream!(u8),
-                SampleFormat::U16 => build_input_stream!(u16),
-                SampleFormat::U32 => build_input_stream!(u32),
-                SampleFormat::U64 => build_input_stream!(u64),
-                SampleFormat::F32 => build_input_stream!(f32),
-                SampleFormat::F64 => build_input_stream!(f64),
-                _ => {
-                    Self::set_stream_health(&self.stream_health, StreamHealth::Stopped);
-                    eprintln!(
-                        "WARNING: Unsupported sample format for live visualizer: {:?}",
-                        self.audio_stream.sample_format
-                    );
-                    return;
-                }
-            };
-            let stream = match stream_result {
-                Ok(stream) => stream,
-                Err(err) => {
-                    Self::set_stream_health(&self.stream_health, StreamHealth::Stopped);
-                    eprintln!("WARNING: stream initialization failed: {}", err);
-                    return;
-                }
-            };
-            if let Err(err) = stream.play() {
-                Self::set_stream_health(&self.stream_health, StreamHealth::Stopped);
-                eprintln!("WARNING: running the audio stream failed: {}", err);
-                return;
-            }
-            Self::set_stream_health(&self.stream_health, StreamHealth::Healthy);
 
             let n = self.nl_udp.panels.len();
             let sample_rate = self.audio_stream.stream_config.sample_rate;
-            // Base colors hold the target Oklch values (with original lightness from the user's RGB)
             let mut base_colors = utils::colors_from_rgb(&self.hues, n);
-            // Brightness multiplier [0,1] per panel — animated by audio amplitude
-            // At 0 the panel is black; at 1 it shows the exact target color
             let mut brightness = vec![0.0_f32; n];
             let mut prev_max = vec![0.0; n];
             let mut speed = vec![0.0; n];
             // Clear any colors left over from a previous Nanoleaf scene or effect
             self.send_black_frame(n);
-            loop {
-                Self::report_stream_errors_if_due(&stream_errors, &self.stream_health);
-                if matches!(self.state, VisualizerState::Done) {
-                    break;
-                }
-                if Self::process_stream_faults(&rx_stream_fault) {
-                    Self::set_stream_health(&self.stream_health, StreamHealth::Restarting);
-                    eprintln!(
-                        "WARNING: audio input device became unavailable; restarting visualizer."
-                    );
-                    return;
-                }
+
+            let stream_errors = Arc::new(Mutex::new(StreamErrorTelemetry::new()));
+            let mut audio_backoff = AUDIO_RESTART_INITIAL_BACKOFF;
+
+            // Outer loop: lifetime of the visualizer thread. The Nanoleaf UDP
+            // attachment lives here. Audio cpal streams are created and dropped
+            // beneath us so the panels stay attached even if the audio device
+            // disappears (e.g. snd-aloop, AirPlay restart).
+            'outer: loop {
                 if !self.process_pending_events(
                     &rx_events,
                     &mut base_colors,
@@ -546,119 +502,54 @@ impl Visualizer {
                     &mut prev_max,
                     &mut speed,
                 ) {
-                    break;
+                    break 'outer;
                 }
-                let to_collect = ((sample_rate as f32) * self.time_window).round() as usize;
-                let mut samples = Vec::with_capacity(2 * to_collect);
-                while samples.len() < to_collect {
-                    Self::report_stream_errors_if_due(&stream_errors, &self.stream_health);
-                    if Self::process_stream_faults(&rx_stream_fault) {
+                if matches!(self.state, VisualizerState::Done) {
+                    break 'outer;
+                }
+
+                let session =
+                    Self::build_audio_session(&self.audio_stream, Arc::clone(&stream_errors));
+                let (stream, rx_audio, rx_stream_fault) = match session {
+                    Some(triple) => triple,
+                    None => {
+                        Self::set_stream_health(&self.stream_health, StreamHealth::Restarting);
+                        if !self.idle_for_audio(
+                            audio_backoff,
+                            &rx_events,
+                            &mut base_colors,
+                            &mut brightness,
+                            &mut prev_max,
+                            &mut speed,
+                        ) {
+                            break 'outer;
+                        }
+                        audio_backoff = (audio_backoff * 2).min(AUDIO_RESTART_MAX_BACKOFF);
+                        continue 'outer;
+                    }
+                };
+                audio_backoff = AUDIO_RESTART_INITIAL_BACKOFF;
+                Self::set_stream_health(&self.stream_health, StreamHealth::Healthy);
+
+                let outcome = self.run_audio_pump(
+                    &rx_audio,
+                    &rx_stream_fault,
+                    &rx_events,
+                    &mut base_colors,
+                    &mut brightness,
+                    &mut prev_max,
+                    &mut speed,
+                    &stream_errors,
+                    sample_rate,
+                );
+                drop(stream);
+                match outcome {
+                    AudioLoopExit::Done => break 'outer,
+                    AudioLoopExit::RebuildAudio => {
                         Self::set_stream_health(&self.stream_health, StreamHealth::Restarting);
                         eprintln!(
-                            "WARNING: audio input device became unavailable; restarting visualizer."
+                            "WARNING: audio stream interrupted; rebuilding (Nanoleaf attachment preserved)."
                         );
-                        return;
-                    }
-                    let mut new_samples = match rx_audio.recv_timeout(AUDIO_RECV_TIMEOUT) {
-                        Ok(samples) => samples,
-                        Err(RecvTimeoutError::Timeout) => {
-                            Self::report_stream_errors_if_due(&stream_errors, &self.stream_health);
-                            if Self::process_stream_faults(&rx_stream_fault) {
-                                Self::set_stream_health(
-                                    &self.stream_health,
-                                    StreamHealth::Restarting,
-                                );
-                                eprintln!(
-                                    "WARNING: audio input device became unavailable; restarting visualizer."
-                                );
-                                return;
-                            }
-                            if !self.process_pending_events(
-                                &rx_events,
-                                &mut base_colors,
-                                &mut brightness,
-                                &mut prev_max,
-                                &mut speed,
-                            ) {
-                                return;
-                            }
-                            if matches!(self.state, VisualizerState::Done) {
-                                return;
-                            }
-                            continue;
-                        }
-                        Err(RecvTimeoutError::Disconnected) => {
-                            Self::set_stream_health(&self.stream_health, StreamHealth::Restarting);
-                            eprintln!(
-                                "WARNING: audio sample channel disconnected; stopping thread."
-                            );
-                            return;
-                        }
-                    };
-                    samples.append(&mut new_samples);
-                }
-                let spectrum = processing::process(samples, self.gain);
-                let hz_per_bin = (sample_rate / 2) / (spectrum.len() as u32);
-                match self.effect {
-                    Effect::Spectrum => processing::update_brightness(
-                        spectrum,
-                        hz_per_bin,
-                        self.min_freq,
-                        self.max_freq,
-                        &mut brightness,
-                        &mut prev_max,
-                        &mut speed,
-                    ),
-                    Effect::EnergyWave => processing::update_brightness_wave(
-                        spectrum,
-                        hz_per_bin,
-                        self.min_freq,
-                        self.max_freq,
-                        &mut brightness,
-                        &mut prev_max,
-                        &mut speed,
-                    ),
-                    Effect::Ripple => processing::update_brightness_ripple(
-                        spectrum,
-                        hz_per_bin,
-                        self.min_freq,
-                        self.max_freq,
-                        &mut brightness,
-                        &mut prev_max,
-                        &mut speed,
-                    ),
-                }
-                // Compute display colors: scale base lightness by brightness multiplier
-                // This ensures at brightness=1.0, the output exactly matches the user's original RGB
-                let display_colors: Vec<Oklch> = base_colors
-                    .iter()
-                    .zip(brightness.iter())
-                    .map(|(base, &b)| Oklch::new(base.l * b, base.chroma, base.hue))
-                    .collect();
-                if self
-                    .nl_udp
-                    .update_panels(&display_colors, self.trans_time)
-                    .is_err()
-                {
-                    // UDP send failed (e.g. extControl timed out) — re-request and retry once
-                    if self.nl_device.request_udp_control().is_ok() {
-                        let _ = self.nl_udp.update_panels(&display_colors, self.trans_time);
-                    }
-                }
-                // Share display colors with subscribers (API preview, macroquad UI)
-                // Clamp to sRGB gamut before converting to u8 to avoid
-                // wrap-around artifacts from out-of-gamut Oklch values
-                if !self.color_subscribers.is_empty() {
-                    let mut frame = HashMap::with_capacity(display_colors.len());
-                    for (i, color) in display_colors.iter().enumerate() {
-                        let srgb: Srgb<f32> = Srgb::from_color(*color);
-                        let r = (srgb.red.clamp(0.0, 1.0) * 255.0) as u8;
-                        let g = (srgb.green.clamp(0.0, 1.0) * 255.0) as u8;
-                        let b = (srgb.blue.clamp(0.0, 1.0) * 255.0) as u8;
-                        frame.insert(self.nl_udp.panels[i].id, [r, g, b]);
-                    }
-                    for tx in &self.color_subscribers {
-                        let _ = tx.try_send(frame.clone());
                     }
                 }
             }
@@ -666,5 +557,240 @@ impl Visualizer {
         });
 
         tx_events
+    }
+
+    /// Construct a fresh cpal capture stream + sample/fault channels.
+    /// Returns None on any failure — callers should sleep with backoff and retry.
+    fn build_audio_session(
+        audio_stream: &AudioStream,
+        stream_errors: Arc<Mutex<StreamErrorTelemetry>>,
+    ) -> Option<(
+        cpal::Stream,
+        flume::Receiver<Vec<f32>>,
+        flume::Receiver<StreamFault>,
+    )> {
+        let (tx_audio, rx_audio) = flume::bounded(AUDIO_TX_CHANNEL_DEPTH);
+        let (tx_stream_fault, rx_stream_fault) = flume::bounded(8);
+        let n_channels = audio_stream.stream_config.channels as usize;
+
+        macro_rules! build_input_stream {
+            ($type:ty) => {
+                audio_stream.device.build_input_stream(
+                    &audio_stream.stream_config,
+                    Self::create_data_callback::<$type>(n_channels, tx_audio.clone()),
+                    {
+                        let tx_stream_fault = tx_stream_fault.clone();
+                        let stream_errors = Arc::clone(&stream_errors);
+                        move |err| {
+                            let err_text = err.to_string();
+                            let kind = Self::classify_stream_error(&err, &err_text);
+                            let mut telemetry = stream_errors.lock();
+                            telemetry.record(kind);
+                            if matches!(kind, StreamErrorKind::DeviceUnavailable) {
+                                let _ = tx_stream_fault.try_send(StreamFault::DeviceUnavailable);
+                            }
+                        }
+                    },
+                    None,
+                )
+            };
+        }
+
+        let stream_result = match audio_stream.sample_format {
+            SampleFormat::I8 => build_input_stream!(i8),
+            SampleFormat::I16 => build_input_stream!(i16),
+            SampleFormat::I32 => build_input_stream!(i32),
+            SampleFormat::I64 => build_input_stream!(i64),
+            SampleFormat::U8 => build_input_stream!(u8),
+            SampleFormat::U16 => build_input_stream!(u16),
+            SampleFormat::U32 => build_input_stream!(u32),
+            SampleFormat::U64 => build_input_stream!(u64),
+            SampleFormat::F32 => build_input_stream!(f32),
+            SampleFormat::F64 => build_input_stream!(f64),
+            _ => {
+                eprintln!(
+                    "WARNING: Unsupported sample format for live visualizer: {:?}",
+                    audio_stream.sample_format
+                );
+                return None;
+            }
+        };
+
+        let stream = match stream_result {
+            Ok(stream) => stream,
+            Err(err) => {
+                eprintln!("WARNING: stream initialization failed: {}", err);
+                return None;
+            }
+        };
+        if let Err(err) = stream.play() {
+            eprintln!("WARNING: running the audio stream failed: {}", err);
+            return None;
+        }
+        Some((stream, rx_audio, rx_stream_fault))
+    }
+
+    /// Sleep for `duration` while continuing to process control events.
+    /// Returns false if the visualizer was asked to stop (End received or the
+    /// events channel was dropped) — caller should exit the outer loop.
+    #[allow(clippy::too_many_arguments)]
+    fn idle_for_audio(
+        &mut self,
+        duration: Duration,
+        rx_events: &flume::Receiver<VisualizerMsg>,
+        base_colors: &mut Vec<Oklch>,
+        brightness: &mut Vec<f32>,
+        prev_max: &mut [f32],
+        speed: &mut [f32],
+    ) -> bool {
+        let deadline = Instant::now() + duration;
+        loop {
+            let now = Instant::now();
+            if now >= deadline {
+                return true;
+            }
+            let chunk = (deadline - now).min(Duration::from_millis(100));
+            match rx_events.recv_timeout(chunk) {
+                Ok(event) => {
+                    self.update_state(event, base_colors, brightness, prev_max, speed);
+                    if matches!(self.state, VisualizerState::Done) {
+                        return false;
+                    }
+                }
+                Err(RecvTimeoutError::Timeout) => continue,
+                Err(RecvTimeoutError::Disconnected) => return false,
+            }
+        }
+    }
+
+    /// Inner audio pump. Drives panels from FFT output until either End is
+    /// received (Done) or the audio stream goes away (RebuildAudio).
+    #[allow(clippy::too_many_arguments)]
+    fn run_audio_pump(
+        &mut self,
+        rx_audio: &flume::Receiver<Vec<f32>>,
+        rx_stream_fault: &flume::Receiver<StreamFault>,
+        rx_events: &flume::Receiver<VisualizerMsg>,
+        base_colors: &mut Vec<Oklch>,
+        brightness: &mut Vec<f32>,
+        prev_max: &mut [f32],
+        speed: &mut [f32],
+        stream_errors: &Arc<Mutex<StreamErrorTelemetry>>,
+        sample_rate: u32,
+    ) -> AudioLoopExit {
+        loop {
+            Self::report_stream_errors_if_due(stream_errors, &self.stream_health);
+            if matches!(self.state, VisualizerState::Done) {
+                return AudioLoopExit::Done;
+            }
+            if Self::process_stream_faults(rx_stream_fault) {
+                return AudioLoopExit::RebuildAudio;
+            }
+            if !self.process_pending_events(rx_events, base_colors, brightness, prev_max, speed) {
+                return AudioLoopExit::Done;
+            }
+
+            let to_collect = ((sample_rate as f32) * self.time_window).round() as usize;
+            let max_buffered = to_collect.saturating_mul(4);
+            let mut samples = Vec::with_capacity(2 * to_collect);
+            while samples.len() < to_collect {
+                Self::report_stream_errors_if_due(stream_errors, &self.stream_health);
+                if Self::process_stream_faults(rx_stream_fault) {
+                    return AudioLoopExit::RebuildAudio;
+                }
+                let mut new_samples = match rx_audio.recv_timeout(AUDIO_RECV_TIMEOUT) {
+                    Ok(samples) => samples,
+                    Err(RecvTimeoutError::Timeout) => {
+                        if Self::process_stream_faults(rx_stream_fault) {
+                            return AudioLoopExit::RebuildAudio;
+                        }
+                        if !self.process_pending_events(
+                            rx_events,
+                            base_colors,
+                            brightness,
+                            prev_max,
+                            speed,
+                        ) {
+                            return AudioLoopExit::Done;
+                        }
+                        if matches!(self.state, VisualizerState::Done) {
+                            return AudioLoopExit::Done;
+                        }
+                        continue;
+                    }
+                    Err(RecvTimeoutError::Disconnected) => {
+                        // The cpal callback's tx_audio was dropped — the stream
+                        // is gone. Rebuild rather than tearing down the thread.
+                        return AudioLoopExit::RebuildAudio;
+                    }
+                };
+                samples.append(&mut new_samples);
+                // If we've buffered far more than this frame needs (consumer
+                // is behind a producer burst), drop the oldest excess so we
+                // catch up to real time instead of accumulating latency.
+                if samples.len() > max_buffered {
+                    let drop_count = samples.len() - to_collect.saturating_mul(2);
+                    samples.drain(..drop_count);
+                }
+            }
+
+            let spectrum = processing::process(samples, self.gain);
+            let hz_per_bin = (sample_rate / 2) / (spectrum.len() as u32);
+            match self.effect {
+                Effect::Spectrum => processing::update_brightness(
+                    spectrum,
+                    hz_per_bin,
+                    self.min_freq,
+                    self.max_freq,
+                    brightness,
+                    prev_max,
+                    speed,
+                ),
+                Effect::EnergyWave => processing::update_brightness_wave(
+                    spectrum,
+                    hz_per_bin,
+                    self.min_freq,
+                    self.max_freq,
+                    brightness,
+                    prev_max,
+                    speed,
+                ),
+                Effect::Ripple => processing::update_brightness_ripple(
+                    spectrum,
+                    hz_per_bin,
+                    self.min_freq,
+                    self.max_freq,
+                    brightness,
+                    prev_max,
+                    speed,
+                ),
+            }
+            let display_colors: Vec<Oklch> = base_colors
+                .iter()
+                .zip(brightness.iter())
+                .map(|(base, &b)| Oklch::new(base.l * b, base.chroma, base.hue))
+                .collect();
+            if self
+                .nl_udp
+                .update_panels(&display_colors, self.trans_time)
+                .is_err()
+                && self.nl_device.request_udp_control().is_ok()
+            {
+                let _ = self.nl_udp.update_panels(&display_colors, self.trans_time);
+            }
+            if !self.color_subscribers.is_empty() {
+                let mut frame = HashMap::with_capacity(display_colors.len());
+                for (i, color) in display_colors.iter().enumerate() {
+                    let srgb: Srgb<f32> = Srgb::from_color(*color);
+                    let r = (srgb.red.clamp(0.0, 1.0) * 255.0) as u8;
+                    let g = (srgb.green.clamp(0.0, 1.0) * 255.0) as u8;
+                    let b = (srgb.blue.clamp(0.0, 1.0) * 255.0) as u8;
+                    frame.insert(self.nl_udp.panels[i].id, [r, g, b]);
+                }
+                for tx in &self.color_subscribers {
+                    let _ = tx.try_send(frame.clone());
+                }
+            }
+        }
     }
 }
