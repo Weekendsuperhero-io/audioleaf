@@ -8,7 +8,7 @@
 #   docker buildx build --platform linux/arm64,linux/amd64 -t audioleaf:test .
 #
 # Run on a Pi (snd-aloop kernel module must be loaded on the host):
-#   podman compose -f docker/compose.yaml up -d
+#   podman compose -f containers/compose.yaml up -d
 
 ARG DEBIAN_RELEASE=bookworm
 ARG RUST_VERSION=1
@@ -78,7 +78,7 @@ COPY --from=web-builder /build/web/dist/ /usr/local/share/audioleaf/web/
 
 COPY piWebServer/shairport-sync.conf /etc/shairport-sync.conf
 COPY piWebServer/asound-default-loopback.conf /etc/asound.conf
-COPY docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+COPY containers/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
 ENV AUDIOLEAF_FRONTEND_DIR=/usr/local/share/audioleaf/web \

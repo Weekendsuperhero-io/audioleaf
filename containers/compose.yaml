@@ -1,13 +1,16 @@
-# Podman/Docker compose for audioleaf on Raspberry Pi.
+# Podman compose for audioleaf on Raspberry Pi.
 #
-# Pi prerequisites (one-time, host side):
+# For systemd integration we ship a Quadlet at containers/audioleaf.container —
+# this compose file is for ad-hoc / dev runs without systemd.
+#
+# Pi prerequisites are handled by pi/setup.sh, but if you're doing it by hand:
 #   echo snd-aloop | sudo tee /etc/modules-load.d/snd-aloop.conf
 #   echo "options snd-aloop id=Loopback index=2 pcm_substreams=8" \
 #     | sudo tee /etc/modprobe.d/snd-aloop.conf
 #   sudo modprobe snd-aloop
 #
 # Run:
-#   podman compose -f docker/compose.yaml up -d
+#   podman compose -f containers/compose.yaml up -d
 
 services:
   audioleaf:

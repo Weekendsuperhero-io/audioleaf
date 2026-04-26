@@ -10,7 +10,7 @@ on:
     paths:
       - "Dockerfile"
       - ".dockerignore"
-      - "docker/**"
+      - "containers/**"
       - ".github/workflows/container.yaml"
       - "Cargo.toml"
       - "Cargo.lock"

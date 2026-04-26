@@ -1,0 +1,36 @@
+# Podman Quadlet for audioleaf.
+#
+# Drop this at /etc/containers/systemd/audioleaf.container, then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now audioleaf.service
+#
+# pi/setup.sh installs this for you and substitutes the volume path if you
+# use --config-dir. Requires podman >= 4.4 (Quadlet generator).
+
+[Unit]
+Description=Audioleaf (Nanoleaf audio visualizer)
+After=network-online.target sound.target
+Wants=network-online.target
+
+[Container]
+Image=ghcr.io/weekendsuperhero-io/audioleaf:latest
+ContainerName=audioleaf
+Network=host
+# nqptp binds UDP 319/320 for PTP; shairport needs NET_ADMIN for RT scheduling.
+AddCapability=NET_BIND_SERVICE
+AddCapability=NET_ADMIN
+AddDevice=/dev/snd:/dev/snd
+GroupAdd=audio
+# Persistent config (config.toml, nl_devices.toml). Path is rewritten by
+# pi/setup.sh to match --config-dir.
+Volume=/etc/audioleaf/config:/root/.config/audioleaf
+# Pull updated image when 'systemctl start' fires after upstream tags move.
+AutoUpdate=registry
+
+[Service]
+Restart=on-failure
+RestartSec=10
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target
