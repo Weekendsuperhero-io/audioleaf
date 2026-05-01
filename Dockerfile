@@ -44,8 +44,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Pin to upstream main at build time. Bump these when you want a refresh.
-ARG NQPTP_REF=main
-ARG SHAIRPORT_REF=master
+# Pinned to specific tags so the Docker layer cache invalidates only when we
+# explicitly bump these values. Override at build time with --build-arg if you
+# need to test a different revision.
+ARG NQPTP_REF=1.2.6
+ARG SHAIRPORT_REF=5.0.4
 
 WORKDIR /src
 RUN git clone --depth 1 --branch ${NQPTP_REF} https://github.com/mikebrady/nqptp.git
