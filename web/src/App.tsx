@@ -146,29 +146,14 @@ function normalizeEffect(value: string | null | undefined): EffectOption {
   return "Spectrum";
 }
 
-function inferPaletteName(
-  colors: Array<[number, number, number]> | null | undefined,
+function paletteEntryFor(
+  name: string | null | undefined,
   palettes: PaletteEntry[],
-): string | null {
-  if (!colors?.length) {
+): PaletteEntry | null {
+  if (!name) {
     return null;
   }
-
-  for (const palette of palettes) {
-    if (palette.colors.length !== colors.length) {
-      continue;
-    }
-    const allEqual = palette.colors.every((color, index) => {
-      const current = colors[index];
-      return (
-        color[0] === current[0] && color[1] === current[1] && color[2] === current[2]
-      );
-    });
-    if (allEqual) {
-      return palette.name;
-    }
-  }
-  return null;
+  return palettes.find((p) => p.name === name) ?? null;
 }
 
 function resolveInitialLayoutDeviceName(
@@ -534,8 +519,10 @@ function App() {
   ) {
     const visualizer = nextConfig.config?.visualizer_config;
     setEffectDraft(normalizeEffect(visualizer?.effect));
-    const inferredPalette = inferPaletteName(visualizer?.colors, nextPalettes);
-    setPaletteDraft(inferredPalette ?? "");
+    // Persisted palette_name is the source of truth; fall back to "" so the
+    // dropdown shows the placeholder until the user picks one.
+    void nextPalettes;
+    setPaletteDraft(visualizer?.palette_name ?? "");
     setSortDraft({
       primary_axis: visualizer?.primary_axis === "X" ? "X" : "Y",
       sort_primary: visualizer?.sort_primary === "Desc" ? "Desc" : "Asc",
@@ -1147,36 +1134,51 @@ function App() {
                 <div>
                   <div className="mb-2 flex flex-wrap items-center gap-2">
                     <p className="text-xs uppercase tracking-[0.15em] text-muted-foreground">
-                      Configured Colors
+                      Configured Palette
                     </p>
-                    {isArtworkSource &&
-                    nowPlaying.palette_colors.length ? (
+                    {isArtworkSource && (nowPlaying?.palette_colors.length ?? 0) > 0 ? (
                       <Badge className="bg-primary/15 text-primary">
                         Overridden by artwork palette
                       </Badge>
                     ) : null}
                   </div>
-                  {visualizerConfig.colors?.length ? (
-                    <div
-                      className={cn(
-                        "flex flex-wrap items-center gap-1.5",
-                        isArtworkSource &&
-                          nowPlaying.palette_colors.length &&
-                          "opacity-40",
-                      )}
-                    >
-                      {visualizerConfig.colors.map(([r, g, b], idx) => (
-                        <span
-                          key={`config-color-${idx}`}
-                          className="h-6 w-8 rounded-sm border border-border/70"
-                          style={{ backgroundColor: `rgb(${r}, ${g}, ${b})` }}
-                          title={`rgb(${r}, ${g}, ${b})`}
-                        />
-                      ))}
-                    </div>
-                  ) : (
-                    <p className="text-sm text-muted-foreground">No colors configured.</p>
-                  )}
+                  {(() => {
+                    const configured = paletteEntryFor(
+                      visualizerConfig.palette_name,
+                      palettes?.palettes ?? [],
+                    );
+                    if (!configured?.colors.length) {
+                      return (
+                        <p className="text-sm text-muted-foreground">
+                          {visualizerConfig.palette_name
+                            ? `Palette "${visualizerConfig.palette_name}" not found on the device.`
+                            : "Using device's currently-selected effect."}
+                        </p>
+                      );
+                    }
+                    const dimmed =
+                      isArtworkSource && (nowPlaying?.palette_colors.length ?? 0) > 0;
+                    return (
+                      <div className="flex flex-col gap-1">
+                        <p className="text-sm text-foreground">{configured.name}</p>
+                        <div
+                          className={cn(
+                            "flex flex-wrap items-center gap-1.5",
+                            dimmed && "opacity-40",
+                          )}
+                        >
+                          {configured.colors.map(([r, g, b], idx) => (
+                            <span
+                              key={`config-color-${idx}`}
+                              className="h-6 w-8 rounded-sm border border-border/70"
+                              style={{ backgroundColor: `rgb(${r}, ${g}, ${b})` }}
+                              title={`rgb(${r}, ${g}, ${b})`}
+                            />
+                          ))}
+                        </div>
+                      </div>
+                    );
+                  })()}
                 </div>
 
                 <div className="rounded-md border border-border/70 bg-background/60 p-3">
