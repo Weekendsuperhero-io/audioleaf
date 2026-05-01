@@ -656,7 +656,7 @@ async fn put_visualizer_palette(
     State(state): State<ApiState>,
     Json(payload): Json<VisualizerPaletteUpdateRequest>,
 ) -> ApiResult<ConfigResponse> {
-    let palettes = palettes_cached(&state);
+    let palettes = palettes_cached_async(&state).await;
     if !palettes.iter().any(|p| p.name == payload.palette_name) {
         let mut names: Vec<String> = palettes.into_iter().map(|p| p.name).collect();
         names.sort();
@@ -676,7 +676,7 @@ async fn put_visualizer_palette(
         config.visualizer_config.palette_name = Some(payload.palette_name.clone());
     })?;
 
-    let colors = resolve_palette_colors(&state, Some(&payload.palette_name));
+    let colors = resolve_palette_colors_async(&state, Some(payload.palette_name.clone())).await;
     let paths = resolve_paths(&state)?;
     // Picking a palette implies leaving artwork-idle if we were in it.
     send_live_message_with_recovery(
@@ -723,7 +723,8 @@ async fn put_visualizer_color_source(
     match kind {
         audioleaf::config::ColorSourceKind::Palette => {
             let colors =
-                resolve_palette_colors(&state, config.visualizer_config.palette_name.as_deref());
+                resolve_palette_colors_async(&state, config.visualizer_config.palette_name.clone())
+                    .await;
             send_live_message_with_recovery(
                 &state,
                 audioleaf::visualizer::VisualizerMsg::SetIdleColor(None),
@@ -738,7 +739,7 @@ async fn put_visualizer_color_source(
         audioleaf::config::ColorSourceKind::Artwork => {
             // Idle controller decides idle vs artwork-driven from current
             // playback / artwork state.
-            update_idle_state(&state);
+            update_idle_state_async(&state).await;
         }
     }
 
@@ -1043,7 +1044,8 @@ async fn put_device_state(
 }
 
 async fn get_palettes(State(state): State<ApiState>) -> Json<PalettesResponse> {
-    let mut palettes: Vec<PaletteEntry> = palettes_cached(&state)
+    let mut palettes: Vec<PaletteEntry> = palettes_cached_async(&state)
+        .await
         .into_iter()
         .map(|p| PaletteEntry {
             name: p.name,
@@ -1507,17 +1509,15 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
             "snam" => guard.track.source_name = payload_text,
             "snua" => guard.track.user_agent = payload_text,
             "clip" | "conn" => guard.track.source_ip = payload_text,
-            "PICT" => {
-                if !payload.is_empty() {
-                    let colors = extract_prominent_colors(&payload).unwrap_or_default();
-                    guard.artwork_mime_type = detect_image_mime_type(&payload).map(str::to_string);
-                    guard.artwork_bytes = Some(payload);
-                    guard.artwork_generation = guard.artwork_generation.saturating_add(1);
-                    guard.palette_colors = colors;
-                    // The decision of whether to drive the visualizer from
-                    // these colors lives in update_idle_state, called below
-                    // after the lock is released.
-                }
+            "PICT" if !payload.is_empty() => {
+                let colors = extract_prominent_colors(&payload).unwrap_or_default();
+                guard.artwork_mime_type = detect_image_mime_type(&payload).map(str::to_string);
+                guard.artwork_bytes = Some(payload);
+                guard.artwork_generation = guard.artwork_generation.saturating_add(1);
+                guard.palette_colors = colors;
+                // The decision of whether to drive the visualizer from
+                // these colors lives in update_idle_state, called below
+                // after the lock is released.
             }
             // Playback state transitions
             "pbeg" => {
@@ -1810,6 +1810,33 @@ fn resolve_palette_colors(state: &ApiState, name: Option<&str>) -> Vec<[u8; 3]> 
 
     // Last resort: hard-coded gradient, used at startup if device is offline.
     Vec::from(audioleaf::constants::DEFAULT_COLORS)
+}
+
+/// Async wrapper around [`palettes_cached`] for use from `async fn` handlers.
+/// The underlying call hits the Nanoleaf via blocking reqwest — without
+/// `spawn_blocking` it would pin a tokio worker for the duration of the
+/// device round-trip (often seconds when the Pi/Nanoleaf are slow), and
+/// enough of those at once will starve the runtime.
+async fn palettes_cached_async(state: &ApiState) -> Vec<audioleaf::nanoleaf::NamedPalette> {
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || palettes_cached(&state))
+        .await
+        .unwrap_or_default()
+}
+
+/// Async wrapper around [`resolve_palette_colors`]. Same rationale.
+async fn resolve_palette_colors_async(state: &ApiState, name: Option<String>) -> Vec<[u8; 3]> {
+    let state = state.clone();
+    tokio::task::spawn_blocking(move || resolve_palette_colors(&state, name.as_deref()))
+        .await
+        .unwrap_or_default()
+}
+
+/// Async wrapper around [`update_idle_state`]. Errors are already swallowed
+/// inside; we just need to keep the blocking work off tokio workers.
+async fn update_idle_state_async(state: &ApiState) {
+    let state = state.clone();
+    let _ = tokio::task::spawn_blocking(move || update_idle_state(&state)).await;
 }
 
 /// Compute whether the visualizer should be in "idle white" state right now,
