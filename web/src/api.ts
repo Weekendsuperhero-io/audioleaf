@@ -10,10 +10,15 @@ export type PathsResponse = {
   devices_file_exists: boolean;
 };
 
+export type ColorSourceKind = "palette" | "artwork";
+
 export type VisualizerConfig = {
   audio_backend: string | null;
   freq_range: [number, number] | null;
-  colors: Array<[number, number, number]> | null;
+  /** "palette" = use a named Nanoleaf-side palette; "artwork" = drive from album cover */
+  color_source: ColorSourceKind | null;
+  /** Name of the Nanoleaf effect whose palette to use. Only meaningful when color_source = "palette". */
+  palette_name: string | null;
   default_gain: number | null;
   transition_time: number | null;
   time_window: number | null;
@@ -21,6 +26,12 @@ export type VisualizerConfig = {
   sort_primary: string | null;
   sort_secondary: string | null;
   effect: string | null;
+};
+
+export type VisualizerColorSourceUpdateRequest = {
+  kind: ColorSourceKind;
+  /** Optional. Only honored when kind = "palette". */
+  palette_name?: string;
 };
 
 export type ConfigPayload = {
@@ -65,7 +76,6 @@ export type NowPlayingResponse = {
   reader_running: boolean;
   metadata_pipe_path: string;
   last_error: string | null;
-  drive_visualizer_palette: boolean;
   track: NowPlayingTrack | null;
   palette_colors: Array<[number, number, number]>;
   artwork_available: boolean;
@@ -75,10 +85,6 @@ export type NowPlayingResponse = {
   progress_elapsed_secs: number | null;
   progress_total_secs: number | null;
   volume_db: number | null;
-};
-
-export type NowPlayingSettingsUpdateRequest = {
-  drive_visualizer_palette?: boolean;
 };
 
 export type DeviceSummary = {
@@ -236,6 +242,14 @@ export const api = {
       },
       body: JSON.stringify({ palette_name }),
     }),
+  setVisualizerColorSource: (payload: VisualizerColorSourceUpdateRequest) =>
+    apiSend<ConfigResponse>("/api/config/visualizer/color-source", {
+      method: "PUT",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(payload),
+    }),
   setVisualizerSort: (payload: VisualizerSortUpdateRequest) =>
     apiSend<ConfigResponse>("/api/config/visualizer/sort", {
       method: "PUT",
@@ -253,14 +267,6 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   nowPlaying: () => apiGet<NowPlayingResponse>("/api/now-playing"),
-  setNowPlayingSettings: (payload: NowPlayingSettingsUpdateRequest) =>
-    apiSend<NowPlayingResponse>("/api/now-playing/settings", {
-      method: "PUT",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    }),
   visualizerPreview: () =>
     apiGet<VisualizerPreviewResponse>("/api/visualizer/preview"),
   visualizerStatus: () =>

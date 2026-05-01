@@ -14,7 +14,7 @@
 
 services:
   audioleaf:
-    image: ghcr.io/weekendsuperhero/audioleaf:latest
+    image: ghcr.io/weekendsuperhero-io/audioleaf:latest
     container_name: audioleaf
     network_mode: host
     restart: unless-stopped

@@ -30,7 +30,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
     thread,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::task::JoinError;
 use tower_http::{
@@ -66,7 +66,15 @@ struct ApiState {
     live_visualizer: Arc<Mutex<Option<LiveVisualizerRuntime>>>,
     live_visualizer_recovery: Arc<Mutex<LiveVisualizerRecoveryState>>,
     now_playing: Arc<Mutex<NowPlayingRuntimeState>>,
+    /// 5-min in-memory cache of the active Nanoleaf device's saved palettes.
+    /// Replaces the static `src/palettes.rs` catalog. None until the first
+    /// successful fetch; refreshed lazily on read once stale.
+    palette_cache: Arc<Mutex<PaletteCacheSlot>>,
 }
+
+type PaletteCacheSlot = Option<(Instant, Vec<audioleaf::nanoleaf::NamedPalette>)>;
+
+const PALETTE_CACHE_TTL: Duration = Duration::from_secs(300);
 
 #[derive(Clone, Debug)]
 struct LiveVisualizerRuntime {
@@ -154,8 +162,10 @@ struct NowPlayingRuntimeState {
     metadata_pipe_path: String,
     reader_running: bool,
     last_error: Option<String>,
-    drive_visualizer_palette: bool,
     track: NowPlayingTrackData,
+    /// Colors extracted from album artwork. Drives the visualizer when
+    /// `visualizer_config.color_source == Artwork`. Empty between tracks /
+    /// when no album cover is available.
     palette_colors: Vec<[u8; 3]>,
     artwork_bytes: Option<Vec<u8>>,
     artwork_mime_type: Option<String>,
@@ -178,7 +188,6 @@ impl NowPlayingRuntimeState {
             metadata_pipe_path,
             reader_running: false,
             last_error: None,
-            drive_visualizer_palette: false,
             track: NowPlayingTrackData::default(),
             palette_colors: Vec::new(),
             artwork_bytes: None,
@@ -233,7 +242,6 @@ impl NowPlayingRuntimeState {
             reader_running: self.reader_running,
             metadata_pipe_path: self.metadata_pipe_path.clone(),
             last_error: self.last_error.clone(),
-            drive_visualizer_palette: self.drive_visualizer_palette,
             track: self.track.has_data().then_some(NowPlayingTrackResponse {
                 title: self.track.title.clone(),
                 artist: self.track.artist.clone(),
@@ -279,7 +287,6 @@ struct NowPlayingResponse {
     reader_running: bool,
     metadata_pipe_path: String,
     last_error: Option<String>,
-    drive_visualizer_palette: bool,
     track: Option<NowPlayingTrackResponse>,
     palette_colors: Vec<[u8; 3]>,
     artwork_available: bool,
@@ -408,6 +415,14 @@ struct VisualizerPaletteUpdateRequest {
 }
 
 #[derive(Debug, Deserialize)]
+struct VisualizerColorSourceUpdateRequest {
+    kind: String,
+    /// Optional. Only honored when `kind == "palette"`. Leaving it unset (or
+    /// passing the same name) leaves the existing `palette_name` config alone.
+    palette_name: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct VisualizerSortUpdateRequest {
     primary_axis: String,
     sort_primary: String,
@@ -421,11 +436,6 @@ struct VisualizerSettingsUpdateRequest {
     default_gain: Option<f32>,
     transition_time: Option<u16>,
     time_window: Option<f32>,
-}
-
-#[derive(Debug, Deserialize)]
-struct NowPlayingSettingsUpdateRequest {
-    drive_visualizer_palette: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -514,6 +524,7 @@ async fn main() -> Result<()> {
         now_playing: Arc::new(Mutex::new(NowPlayingRuntimeState::new(
             metadata_pipe_path.clone(),
         ))),
+        palette_cache: Arc::new(Mutex::new(None)),
     };
 
     if let Err(err) = restart_live_visualizer(&state).await {
@@ -536,6 +547,10 @@ async fn main() -> Result<()> {
             "/api/config/visualizer/palette",
             put(put_visualizer_palette),
         )
+        .route(
+            "/api/config/visualizer/color-source",
+            put(put_visualizer_color_source),
+        )
         .route("/api/config/visualizer/sort", put(put_visualizer_sort))
         .route(
             "/api/config/visualizer/settings",
@@ -543,7 +558,6 @@ async fn main() -> Result<()> {
         )
         .route("/api/now-playing", get(get_now_playing))
         .route("/api/now-playing/artwork", get(get_now_playing_artwork))
-        .route("/api/now-playing/settings", put(put_now_playing_settings))
         .route("/api/visualizer/preview", get(get_visualizer_preview))
         .route("/api/visualizer/ws", get(visualizer_ws))
         .route("/api/visualizer/status", get(get_visualizer_status))
@@ -642,34 +656,91 @@ async fn put_visualizer_palette(
     State(state): State<ApiState>,
     Json(payload): Json<VisualizerPaletteUpdateRequest>,
 ) -> ApiResult<ConfigResponse> {
-    let colors = audioleaf::palettes::get_palette(&payload.palette_name).ok_or_else(|| {
-        let mut names = audioleaf::palettes::get_palette_names();
+    let palettes = palettes_cached(&state);
+    if !palettes.iter().any(|p| p.name == payload.palette_name) {
+        let mut names: Vec<String> = palettes.into_iter().map(|p| p.name).collect();
         names.sort();
-        ApiError::bad_request(format!(
-            "Unknown palette '{}'. Available: {}",
+        return Err(ApiError::bad_request(format!(
+            "Unknown palette '{}'. Available on device: {}",
             payload.palette_name,
-            names.join(", ")
-        ))
-    })?;
+            if names.is_empty() {
+                "(no palettes — Nanoleaf device may be offline)".to_string()
+            } else {
+                names.join(", ")
+            }
+        )));
+    }
 
     let config = update_runtime_config(&state, |config| {
-        config.visualizer_config.colors = Some(colors.clone());
+        config.visualizer_config.color_source = Some(audioleaf::config::ColorSourceKind::Palette);
+        config.visualizer_config.palette_name = Some(payload.palette_name.clone());
     })?;
-    // Explicit palette pick wins over artwork-drive. If we left it enabled,
-    // the next artwork update would silently override the user's choice.
-    {
-        let mut guard = state.now_playing.lock();
-        if guard.drive_visualizer_palette {
-            guard.drive_visualizer_palette = false;
-            guard.updated_at_ms = Some(now_unix_ms());
-        }
-    }
+
+    let colors = resolve_palette_colors(&state, Some(&payload.palette_name));
     let paths = resolve_paths(&state)?;
+    // Picking a palette implies leaving artwork-idle if we were in it.
+    send_live_message_with_recovery(
+        &state,
+        audioleaf::visualizer::VisualizerMsg::SetIdleColor(None),
+    )
+    .await?;
     send_live_message_with_recovery(
         &state,
         audioleaf::visualizer::VisualizerMsg::SetPalette(colors),
     )
     .await?;
+
+    Ok(Json(ConfigResponse {
+        paths,
+        config: Some(config),
+    }))
+}
+
+async fn put_visualizer_color_source(
+    State(state): State<ApiState>,
+    Json(payload): Json<VisualizerColorSourceUpdateRequest>,
+) -> ApiResult<ConfigResponse> {
+    let kind = match payload.kind.to_ascii_lowercase().as_str() {
+        "palette" => audioleaf::config::ColorSourceKind::Palette,
+        "artwork" => audioleaf::config::ColorSourceKind::Artwork,
+        other => {
+            return Err(ApiError::bad_request(format!(
+                "color_source kind must be `palette` or `artwork`, got `{}`",
+                other
+            )));
+        }
+    };
+
+    let config = update_runtime_config(&state, |config| {
+        config.visualizer_config.color_source = Some(kind);
+        if kind == audioleaf::config::ColorSourceKind::Palette && payload.palette_name.is_some() {
+            config.visualizer_config.palette_name = payload.palette_name.clone();
+        }
+    })?;
+
+    let paths = resolve_paths(&state)?;
+
+    match kind {
+        audioleaf::config::ColorSourceKind::Palette => {
+            let colors =
+                resolve_palette_colors(&state, config.visualizer_config.palette_name.as_deref());
+            send_live_message_with_recovery(
+                &state,
+                audioleaf::visualizer::VisualizerMsg::SetIdleColor(None),
+            )
+            .await?;
+            send_live_message_with_recovery(
+                &state,
+                audioleaf::visualizer::VisualizerMsg::SetPalette(colors),
+            )
+            .await?;
+        }
+        audioleaf::config::ColorSourceKind::Artwork => {
+            // Idle controller decides idle vs artwork-driven from current
+            // playback / artwork state.
+            update_idle_state(&state);
+        }
+    }
 
     Ok(Json(ConfigResponse {
         paths,
@@ -853,64 +924,6 @@ async fn get_now_playing_artwork(
     Ok(response)
 }
 
-async fn put_now_playing_settings(
-    State(state): State<ApiState>,
-    Json(payload): Json<NowPlayingSettingsUpdateRequest>,
-) -> ApiResult<NowPlayingResponse> {
-    let Some(enabled) = payload.drive_visualizer_palette else {
-        return Err(ApiError::bad_request(
-            "Request must include drive_visualizer_palette.",
-        ));
-    };
-
-    enum PaletteAction {
-        ApplyArtwork(Vec<[u8; 3]>),
-        RestoreConfig,
-        None,
-    }
-
-    let action = {
-        let mut guard = state.now_playing.lock();
-        let was_enabled = guard.drive_visualizer_palette;
-        guard.drive_visualizer_palette = enabled;
-        guard.updated_at_ms = Some(now_unix_ms());
-
-        if enabled && !guard.palette_colors.is_empty() {
-            PaletteAction::ApplyArtwork(guard.palette_colors.clone())
-        } else if was_enabled && !enabled {
-            PaletteAction::RestoreConfig
-        } else {
-            PaletteAction::None
-        }
-    };
-
-    match action {
-        PaletteAction::ApplyArtwork(colors) => {
-            apply_now_playing_palette_to_live_runtime(&state, colors);
-        }
-        PaletteAction::RestoreConfig => {
-            // Drive just turned off — re-assert the configured palette so the
-            // visualizer doesn't linger on the last artwork colors. SetPalette
-            // clears brightness and sends a black frame in visualizer.rs.
-            let config_colors = get_runtime_config_clone(&state)?
-                .visualizer_config
-                .colors
-                .unwrap_or_default();
-            if !config_colors.is_empty() {
-                send_live_message_with_recovery(
-                    &state,
-                    audioleaf::visualizer::VisualizerMsg::SetPalette(config_colors),
-                )
-                .await?;
-            }
-        }
-        PaletteAction::None => {}
-    }
-
-    let snapshot = current_now_playing_snapshot(&state)?;
-    Ok(Json(snapshot))
-}
-
 async fn get_devices(State(state): State<ApiState>) -> ApiResult<DevicesResponse> {
     let paths = resolve_paths(&state)?;
 
@@ -1029,17 +1042,15 @@ async fn put_device_state(
     }))
 }
 
-async fn get_palettes() -> Json<PalettesResponse> {
-    let mut names = audioleaf::palettes::get_palette_names();
-    names.sort();
-
-    let palettes = names
+async fn get_palettes(State(state): State<ApiState>) -> Json<PalettesResponse> {
+    let mut palettes: Vec<PaletteEntry> = palettes_cached(&state)
         .into_iter()
-        .filter_map(|name| {
-            audioleaf::palettes::get_palette(&name).map(|colors| PaletteEntry { name, colors })
+        .map(|p| PaletteEntry {
+            name: p.name,
+            colors: p.colors,
         })
         .collect();
-
+    palettes.sort_by(|a, b| a.name.cmp(&b.name));
     Json(PalettesResponse { palettes })
 }
 
@@ -1190,7 +1201,7 @@ fn start_now_playing_reader(state: &ApiState) {
         now_playing.subscribe(move |guard: RwLockReadGuard<'_, Option<NowPlayingInfo>>| {
             let Some(info) = guard.as_ref() else { return };
 
-            let palette_to_apply: Option<Vec<[u8; 3]>> = {
+            {
                 let mut np = state_clone.now_playing.lock();
                 np.reader_running = true;
                 np.last_error = None;
@@ -1230,7 +1241,6 @@ fn start_now_playing_reader(state: &ApiState) {
                     np.artwork_generation = np.artwork_generation.saturating_add(1);
                 }
 
-                let mut colors_to_push: Option<Vec<[u8; 3]>> = None;
                 if let Some(ref cover) = info.album_cover {
                     let mut buf: std::io::Cursor<Vec<u8>> = std::io::Cursor::new(Vec::new());
                     if cover.write_to(&mut buf, image::ImageFormat::Jpeg).is_ok() {
@@ -1239,18 +1249,15 @@ fn start_now_playing_reader(state: &ApiState) {
                         np.artwork_mime_type = Some("image/jpeg".to_string());
                         np.artwork_bytes = Some(bytes);
                         np.artwork_generation = np.artwork_generation.saturating_add(1);
-                        np.palette_colors = colors.clone();
-                        if np.drive_visualizer_palette && !colors.is_empty() {
-                            colors_to_push = Some(colors);
-                        }
+                        np.palette_colors = colors;
                     }
                 }
-                colors_to_push
-            };
-
-            if let Some(colors) = palette_to_apply {
-                apply_now_playing_palette_to_live_runtime(&state_clone, colors);
             }
+
+            // Re-evaluate idle/artwork state from the freshly-updated artwork
+            // and playback fields. Decides whether to push SetIdleColor or
+            // SetPalette to the visualizer.
+            update_idle_state(&state_clone);
         });
 
         // Block to keep the subscriber alive
@@ -1455,7 +1462,6 @@ fn process_shairport_metadata_stream<R: BufRead>(
 #[cfg(target_os = "linux")]
 fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, payload: Vec<u8>) {
     let payload_text = payload_bytes_to_string(&payload);
-    let mut maybe_palette_to_apply: Option<Vec<[u8; 3]>> = None;
 
     let mut guard = state.now_playing.lock();
     guard.reader_running = true;
@@ -1507,10 +1513,10 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
                     guard.artwork_mime_type = detect_image_mime_type(&payload).map(str::to_string);
                     guard.artwork_bytes = Some(payload);
                     guard.artwork_generation = guard.artwork_generation.saturating_add(1);
-                    guard.palette_colors = colors.clone();
-                    if guard.drive_visualizer_palette && !colors.is_empty() {
-                        maybe_palette_to_apply = Some(colors);
-                    }
+                    guard.palette_colors = colors;
+                    // The decision of whether to drive the visualizer from
+                    // these colors lives in update_idle_state, called below
+                    // after the lock is released.
                 }
             }
             // Playback state transitions
@@ -1549,9 +1555,9 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
 
     drop(guard);
 
-    if let Some(colors) = maybe_palette_to_apply {
-        apply_now_playing_palette_to_live_runtime(state, colors);
-    }
+    // Idle/artwork state may have changed (PICT, playback transition, prgr).
+    // Recompute and emit SetIdleColor / SetPalette if needed.
+    update_idle_state(state);
 }
 
 #[cfg(target_os = "linux")]
@@ -1643,40 +1649,6 @@ fn extract_prominent_colors(image_bytes: &[u8]) -> Option<Vec<[u8; 3]>> {
     audioleaf::now_playing::extract_prominent_colors_from_bytes(image_bytes)
 }
 
-fn apply_now_playing_palette_to_live_runtime(state: &ApiState, colors: Vec<[u8; 3]>) {
-    if colors.is_empty() {
-        return;
-    }
-
-    let Ok(Some(runtime)) = current_live_visualizer(state) else {
-        return;
-    };
-
-    if runtime
-        .sender
-        .send(audioleaf::visualizer::VisualizerMsg::SetPalette(
-            colors.clone(),
-        ))
-        .is_ok()
-    {
-        return;
-    }
-
-    if let Err(err) = restart_live_visualizer_sync(state) {
-        eprintln!(
-            "WARNING: failed to restart live visualizer while applying metadata palette: {}",
-            err.message
-        );
-        return;
-    }
-
-    if let Ok(Some(restarted)) = current_live_visualizer(state) {
-        let _ = restarted
-            .sender
-            .send(audioleaf::visualizer::VisualizerMsg::SetPalette(colors));
-    }
-}
-
 fn now_unix_ms() -> u64 {
     match SystemTime::now().duration_since(UNIX_EPOCH) {
         Ok(duration) => duration.as_millis() as u64,
@@ -1760,6 +1732,136 @@ fn load_device_by_name(
 fn get_runtime_config_clone(state: &ApiState) -> Result<audioleaf::config::Config, ApiError> {
     let guard = state.runtime_config.lock();
     Ok(guard.clone())
+}
+
+/// Resolve the `NlDevice` we should pull palettes from. Uses
+/// `default_nl_device_name` from config if set; otherwise the first device in
+/// `nl_devices.toml`.
+fn active_palette_device(state: &ApiState) -> Result<audioleaf::nanoleaf::NlDevice, ApiError> {
+    let config = get_runtime_config_clone(state)?;
+    let paths = resolve_paths(state)?;
+    if !paths.devices_file_exists {
+        return Err(ApiError::not_found(format!(
+            "No devices file found at {}",
+            paths.devices_file_path
+        )));
+    }
+    let devices_path = PathBuf::from(&paths.devices_file_path);
+    let preferred = config.default_nl_device_name.as_deref();
+    audioleaf::nanoleaf::NlDevice::find_in_file(&devices_path, preferred)
+        .map_err(|err| ApiError::not_found(err.to_string()))
+}
+
+/// Read palettes from cache. Refreshes from the device if missing or stale.
+/// Returns an empty Vec on device-fetch failure rather than failing the
+/// caller — palette lookups should degrade gracefully when the device is off.
+fn palettes_cached(state: &ApiState) -> Vec<audioleaf::nanoleaf::NamedPalette> {
+    {
+        let guard = state.palette_cache.lock();
+        if let Some((fetched_at, palettes)) = guard.as_ref()
+            && fetched_at.elapsed() < PALETTE_CACHE_TTL
+        {
+            return palettes.clone();
+        }
+    }
+    let device = match active_palette_device(state) {
+        Ok(d) => d,
+        Err(_) => return Vec::new(),
+    };
+    match device.list_effect_palettes() {
+        Ok(palettes) => {
+            let mut guard = state.palette_cache.lock();
+            *guard = Some((Instant::now(), palettes.clone()));
+            palettes
+        }
+        Err(err) => {
+            eprintln!(
+                "WARNING: failed to fetch palettes from Nanoleaf device '{}': {}",
+                device.name, err
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Resolve a palette name to its colors. Falls back to the device's
+/// currently-selected effect when:
+///     - the requested name doesn't exist (renamed/removed in the Nanoleaf app)
+///     - no name was given (`name = None`)
+/// Final fallback if nothing matches: `constants::DEFAULT_COLORS`, so the
+/// visualizer always has something to animate.
+fn resolve_palette_colors(state: &ApiState, name: Option<&str>) -> Vec<[u8; 3]> {
+    let palettes = palettes_cached(state);
+
+    if let Some(want) = name
+        && let Some(found) = palettes.iter().find(|p| p.name == want)
+    {
+        return found.colors.clone();
+    }
+
+    // Try the device's currently-selected effect as the fallback.
+    if let Ok(device) = active_palette_device(state)
+        && let Ok(info) = device.get_device_info()
+        && let Some(selected) = info["effects"]["select"].as_str()
+        && let Some(found) = palettes.iter().find(|p| p.name == selected)
+    {
+        return found.colors.clone();
+    }
+
+    // Last resort: hard-coded gradient, used at startup if device is offline.
+    Vec::from(audioleaf::constants::DEFAULT_COLORS)
+}
+
+/// Compute whether the visualizer should be in "idle white" state right now,
+/// and apply the transition (send SetIdleColor / SetPalette as appropriate).
+/// Idle when: color_source = Artwork AND no artwork colors AND not playing.
+fn update_idle_state(state: &ApiState) {
+    let config = match get_runtime_config_clone(state) {
+        Ok(c) => c,
+        Err(_) => return,
+    };
+    let is_artwork_mode = matches!(
+        config.visualizer_config.color_source,
+        Some(audioleaf::config::ColorSourceKind::Artwork)
+    );
+
+    let (artwork_present, is_playing) = {
+        let guard = state.now_playing.lock();
+        (
+            !guard.palette_colors.is_empty(),
+            matches!(guard.playback_state, PlaybackState::Playing),
+        )
+    };
+
+    let should_idle = is_artwork_mode && (!artwork_present || !is_playing);
+
+    let Ok(Some(runtime)) = current_live_visualizer(state) else {
+        return;
+    };
+    if should_idle {
+        let _ = runtime
+            .sender
+            .send(audioleaf::visualizer::VisualizerMsg::SetIdleColor(Some(
+                audioleaf::constants::IDLE_WHITE_RGB,
+            )));
+    } else {
+        // Exit idle: clear the flag and re-apply whichever palette is current
+        // so the audio pipeline has the right base colors to drive.
+        let _ = runtime
+            .sender
+            .send(audioleaf::visualizer::VisualizerMsg::SetIdleColor(None));
+        let colors = if is_artwork_mode {
+            // Use artwork colors (we know it's present from the check above)
+            state.now_playing.lock().palette_colors.clone()
+        } else {
+            resolve_palette_colors(state, config.visualizer_config.palette_name.as_deref())
+        };
+        if !colors.is_empty() {
+            let _ = runtime
+                .sender
+                .send(audioleaf::visualizer::VisualizerMsg::SetPalette(colors));
+        }
+    }
 }
 
 fn update_runtime_config<F>(
@@ -2017,11 +2119,26 @@ fn build_live_visualizer(state: &ApiState) -> Result<LiveVisualizerRuntime, ApiE
 
     let (color_tx, color_rx) = flume::bounded(1);
     let stream_health = Arc::new(Mutex::new(audioleaf::visualizer::StreamHealth::Starting));
+
+    // Resolve initial hues from the configured color source. For Artwork mode
+    // and any case where the palette can't be looked up, the visualizer's
+    // own fallback (DEFAULT_COLORS) kicks in via empty input.
+    let initial_hues = match config.visualizer_config.color_source {
+        Some(audioleaf::config::ColorSourceKind::Artwork) => {
+            // Use any current artwork colors; otherwise an empty Vec triggers
+            // the visualizer's own DEFAULT_COLORS fallback (panels go to idle
+            // white shortly after, via update_idle_state).
+            state.now_playing.lock().palette_colors.clone()
+        }
+        _ => resolve_palette_colors(state, config.visualizer_config.palette_name.as_deref()),
+    };
+
     let visualizer = audioleaf::visualizer::Visualizer::new(
         config.visualizer_config,
         audio_stream,
         &nl_device,
         vec![color_tx],
+        initial_hues,
     )
     .map_err(ApiError::internal)?
     .with_stream_health(Arc::clone(&stream_health));

@@ -30,6 +30,11 @@ pub const FREQ_RANGE_PRESETS: [(u16, u16, &str); 5] = [
     (1000, 12000, "Treble"),
 ];
 
+/// Static color shown on panels when color_source = Artwork and no audio is
+/// playing (so no artwork to drive from). 102 ≈ 40% of 255 — bright enough to
+/// be visibly "on", dim enough to live with in a dark room.
+pub const IDLE_WHITE_RGB: [u8; 3] = [102, 102, 102];
+
 // other
 pub const DEFAULT_CONFIG_DIR: &str = "audioleaf";
 pub const DEFAULT_CONFIG_FILE: &str = "config.toml";

@@ -36,7 +36,6 @@ const DEFAULT_BRIGHTNESS_DRAFT = "50";
 const EFFECT_OPTIONS = ["Spectrum", "EnergyWave", "Ripple"] as const;
 
 const LS_SHOW_LIVE_PREVIEW = "audioleaf.show_live_preview";
-const LS_DRIVE_PALETTE = "audioleaf.drive_visualizer_palette";
 
 function readLocalBool(key: string, fallback: boolean): boolean {
   if (typeof window === "undefined") return fallback;
@@ -365,20 +364,16 @@ function App() {
     writeLocalBool(LS_SHOW_LIVE_PREVIEW, showLivePreview);
   }, [showLivePreview]);
 
-  const nowPlayingPaletteRestoredRef = useRef(false);
+  // Best-effort cleanup of the legacy drive-palette localStorage key (now
+  // superseded by the persisted color_source field on visualizer_config).
   useEffect(() => {
-    if (nowPlayingPaletteRestoredRef.current) return;
-    if (loadState !== "ready" || !nowPlaying) return;
-    nowPlayingPaletteRestoredRef.current = true;
-    const desired = readLocalBool(LS_DRIVE_PALETTE, false);
-    if (desired && !nowPlaying.drive_visualizer_palette) {
-      void handleNowPlayingDrivePaletteToggle(true);
+    if (typeof window === "undefined") return;
+    try {
+      window.localStorage.removeItem("audioleaf.drive_visualizer_palette");
+    } catch {
+      // ignore — older browsers / private mode
     }
-    // If the server already has it on, ensure localStorage reflects that.
-    if (nowPlaying.drive_visualizer_palette) {
-      writeLocalBool(LS_DRIVE_PALETTE, true);
-    }
-  }, [loadState, nowPlaying]);
+  }, []);
 
   useEffect(() => {
     if (!showLivePreview) {
@@ -810,23 +805,21 @@ function App() {
     }
   }
 
-  async function handleNowPlayingDrivePaletteToggle(enabled: boolean) {
+  async function handleColorSourceChange(kind: "palette" | "artwork") {
     try {
       setErrorMessage(null);
       setActionMessage(null);
-      const updated = await api.setNowPlayingSettings({
-        drive_visualizer_palette: enabled,
-      });
-      setNowPlaying(updated);
-      writeLocalBool(LS_DRIVE_PALETTE, enabled);
+      const updated = await api.setVisualizerColorSource({ kind });
+      setConfig(updated);
+      hydrateVisualizerDrafts(updated, palettes?.palettes ?? [], audioBackends);
       setActionMessage(
-        enabled
-          ? "Now playing palette mode enabled."
-          : "Now playing palette mode disabled.",
+        kind === "artwork"
+          ? "Color source: album artwork."
+          : "Color source: named palette.",
       );
     } catch (error) {
       setErrorMessage(
-        error instanceof Error ? error.message : "Failed to update now playing settings",
+        error instanceof Error ? error.message : "Failed to update color source",
       );
     }
   }
@@ -889,6 +882,11 @@ function App() {
     }
   }
 
+  // Persisted color source from config — drives both the radio control and
+  // the various "is artwork mode active" badges in the now-playing card.
+  const colorSource = config?.config?.visualizer_config.color_source ?? "palette";
+  const isArtworkSource = colorSource === "artwork";
+
   return (
     <main className="mx-auto min-h-screen w-full max-w-6xl p-5 pb-16 sm:p-8">
       <header className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between">
@@ -926,7 +924,7 @@ function App() {
         <Card
           className={cn(
             "border-primary/30 shadow-card",
-            nowPlaying?.drive_visualizer_palette &&
+            isArtworkSource &&
               nowPlaying?.palette_colors.length &&
               "border-primary ring-2 ring-primary/40",
           )}
@@ -940,23 +938,36 @@ function App() {
                 <Badge variant={nowPlaying?.reader_running ? "default" : "secondary"}>
                   {nowPlaying?.reader_running ? "Reader Running" : "Reader Waiting"}
                 </Badge>
-                {nowPlaying?.drive_visualizer_palette &&
+                {isArtworkSource &&
                 nowPlaying?.palette_colors.length ? (
                   <Badge className="bg-primary text-primary-foreground">
                     Visualizer palette: artwork
                   </Badge>
                 ) : null}
               </div>
-              <label className="inline-flex items-center gap-3 text-sm text-muted-foreground">
-                <Switch
-                  checked={nowPlaying?.drive_visualizer_palette ?? false}
-                  onChange={(event) =>
-                    void handleNowPlayingDrivePaletteToggle(event.currentTarget.checked)
-                  }
-                  disabled={!nowPlaying}
-                />
-                Use artwork colors
-              </label>
+              <fieldset className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
+                <legend className="sr-only">Color source</legend>
+                <label className="inline-flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="color-source"
+                    value="palette"
+                    checked={!isArtworkSource}
+                    onChange={() => void handleColorSourceChange("palette")}
+                  />
+                  Named palette
+                </label>
+                <label className="inline-flex items-center gap-2">
+                  <input
+                    type="radio"
+                    name="color-source"
+                    value="artwork"
+                    checked={isArtworkSource}
+                    onChange={() => void handleColorSourceChange("artwork")}
+                  />
+                  Album artwork
+                </label>
+              </fieldset>
             </div>
 
             {nowPlaying?.last_error ? (
@@ -1052,7 +1063,7 @@ function App() {
               {nowPlaying?.palette_colors.length ? (
                 <div className="flex flex-col items-center gap-2">
                   <p className="text-xs uppercase tracking-[0.15em] text-muted-foreground">
-                    {nowPlaying.drive_visualizer_palette
+                    {isArtworkSource
                       ? "Active artwork palette"
                       : "Artwork palette (inactive)"}
                   </p>
@@ -1062,7 +1073,7 @@ function App() {
                         key={`now-playing-color-${idx}`}
                         className={cn(
                           "h-8 w-10 rounded-sm border border-border/70 transition-shadow",
-                          nowPlaying.drive_visualizer_palette &&
+                          isArtworkSource &&
                             "shadow-[0_0_0_2px_hsl(var(--primary)/0.6)]",
                         )}
                         style={{ backgroundColor: `rgb(${r}, ${g}, ${b})` }}
@@ -1138,7 +1149,7 @@ function App() {
                     <p className="text-xs uppercase tracking-[0.15em] text-muted-foreground">
                       Configured Colors
                     </p>
-                    {nowPlaying?.drive_visualizer_palette &&
+                    {isArtworkSource &&
                     nowPlaying.palette_colors.length ? (
                       <Badge className="bg-primary/15 text-primary">
                         Overridden by artwork palette
@@ -1149,7 +1160,7 @@ function App() {
                     <div
                       className={cn(
                         "flex flex-wrap items-center gap-1.5",
-                        nowPlaying?.drive_visualizer_palette &&
+                        isArtworkSource &&
                           nowPlaying.palette_colors.length &&
                           "opacity-40",
                       )}
