@@ -1,2 +1,12 @@
 /target
+/node_modules
 .DS_Store
+web/node_modules
+web/dist
+web/*.tsbuildinfo
+.claude
+*.wav
+.pnpm-store
+
+# Stakpak session files
+.stakpak/session*
