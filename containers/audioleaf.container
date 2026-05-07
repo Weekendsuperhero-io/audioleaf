@@ -24,6 +24,12 @@ GroupAdd=audio
 # Persistent config (config.toml, nl_devices.toml). Path is rewritten by
 # pi/setup.sh to match --config-dir.
 Volume=/etc/audioleaf/config:/root/.config/audioleaf
+# Share the host's dbus + avahi so shairport-sync registers AirPlay via the
+# host's avahi-daemon instead of running its own. With Network=host, two
+# avahi-daemons on the same network collide on the mDNS hostname, producing
+# a "Host name conflict, retrying with HOST-N" loop.
+Volume=/var/run/dbus:/var/run/dbus
+Volume=/var/run/avahi-daemon:/var/run/avahi-daemon
 # Pull updated image when 'systemctl start' fires after upstream tags move.
 AutoUpdate=registry
 # Uncomment to dump every parsed shairport metadata item to journalctl

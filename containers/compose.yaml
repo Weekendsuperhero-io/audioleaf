@@ -28,6 +28,12 @@ services:
       - audio
     volumes:
       - ${AUDIOLEAF_CONFIG_DIR:-./config}:/root/.config/audioleaf
+      # Share the host's dbus + avahi so shairport-sync registers AirPlay via
+      # the host's avahi-daemon instead of running its own. With network_mode:
+      # host, two avahi-daemons on the same network collide on the mDNS
+      # hostname, producing a "Host name conflict, retrying with HOST-N" loop.
+      - /var/run/dbus:/var/run/dbus
+      - /var/run/avahi-daemon:/var/run/avahi-daemon
       # Diagnostic overrides — mount host copies on top of the published image so
       # we can iterate on entrypoint/shairport config + run diag.sh without rebuild.
       # Remove this block once root cause is captured.
