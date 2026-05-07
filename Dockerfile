@@ -12,7 +12,7 @@
 
 ARG DEBIAN_RELEASE=bookworm
 ARG RUST_VERSION=1
-ARG NODE_VERSION=20
+ARG NODE_VERSION=22
 
 # ---------- Stage 1: Rust binary ----------
 FROM rust:${RUST_VERSION}-${DEBIAN_RELEASE} AS audioleaf-builder
@@ -26,7 +26,7 @@ RUN cargo build --release --locked --bin audioleaf
 
 # ---------- Stage 2: React frontend (pnpm) ----------
 FROM node:${NODE_VERSION}-${DEBIAN_RELEASE}-slim AS web-builder
-RUN npm install -g pnpm@10.33.0
+RUN npm install -g pnpm@11.0.8
 WORKDIR /build/web
 COPY web/package.json web/pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile

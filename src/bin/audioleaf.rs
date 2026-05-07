@@ -1758,6 +1758,7 @@ fn detect_image_mime_type(bytes: &[u8]) -> Option<&'static str> {
     None
 }
 
+#[cfg(target_os = "macos")]
 fn extract_prominent_colors(image_bytes: &[u8]) -> Option<Vec<[u8; 3]>> {
     audioleaf::now_playing::extract_prominent_colors_from_bytes(image_bytes)
 }
