@@ -1271,6 +1271,9 @@ fn start_now_playing_reader(state: &ApiState) {
 
 #[cfg(target_os = "linux")]
 fn start_now_playing_reader(state: &ApiState) {
+    // Spawn the cover-art color-extraction worker once. The reader loop hands
+    // PICT bytes off via this channel so it can keep draining the FIFO.
+    let pict_tx = start_pict_worker(state.clone());
     let state = state.clone();
     thread::spawn(move || {
         loop {
@@ -1286,7 +1289,7 @@ fn start_now_playing_reader(state: &ApiState) {
                     }
 
                     let reader = BufReader::new(file);
-                    let result = process_shairport_metadata_stream(&state, reader);
+                    let result = process_shairport_metadata_stream(&state, reader, &pict_tx);
 
                     let mut guard = state.now_playing.lock();
                     guard.reader_running = false;
@@ -1345,6 +1348,88 @@ async fn run_live_visualizer_watchdog_tick(state: &ApiState) -> Result<(), ApiEr
     recover_live_visualizer(state, "watchdog health check").await
 }
 
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy)]
+enum MetadataDisposition {
+    /// Code is unknown / unhandled — don't even decode the base64 payload.
+    Skip,
+    /// Handler doesn't read the payload — dispatch with an empty Vec.
+    NoPayload,
+    /// Handler reads the payload — decode base64 and dispatch.
+    Decode,
+}
+
+/// Decide whether an `<item>`'s payload is worth decoding before we hand it to
+/// `apply_metadata_item_to_state`. Shairport emits dozens of DMAP codes per
+/// burst; only this whitelisted subset is consumed. Skipping the rest avoids
+/// per-item base64 alloc/decode that would otherwise stall the reader thread
+/// (and backpressure the FIFO into shairport).
+#[cfg(target_os = "linux")]
+fn metadata_code_disposition(item_type: &str, code: &str) -> MetadataDisposition {
+    match (item_type, code) {
+        (
+            "core",
+            "minm" | "asar" | "asal" | "asgn" | "ascp" | "asul" | "astm" | "asdk" | "caps",
+        ) => MetadataDisposition::Decode,
+        ("ssnc", "snam" | "snua" | "clip" | "conn" | "PICT" | "prgr" | "pvol") => {
+            MetadataDisposition::Decode
+        }
+        (
+            "ssnc",
+            "pbeg" | "prsm" | "pres" | "pfls" | "paus" | "pend" | "disc" | "mdst" | "mden" | "pcst"
+            | "pcen",
+        ) => MetadataDisposition::NoPayload,
+        _ => MetadataDisposition::Skip,
+    }
+}
+
+/// Cover-art job sent from the metadata reader thread to the dedicated PICT
+/// worker thread. `generation` tracks `NowPlayingRuntimeState::artwork_generation`
+/// at the time the job was enqueued; the worker drops its result if the
+/// generation has advanced (i.e. a newer cover arrived first).
+#[cfg(target_os = "linux")]
+struct PictJob {
+    generation: u64,
+    bytes: Vec<u8>,
+}
+
+/// Spawn a single-purpose worker that runs `extract_prominent_colors_from_bytes`
+/// off the metadata reader thread. The reader thread used to do this inline
+/// inside the `now_playing` mutex critical section, which blocked both the FIFO
+/// drain and `/api/now-playing` for the duration of the image work
+/// (100–500 ms per cover on a Pi).
+///
+/// The worker uses a drain-to-latest pattern: when extraction finishes, any
+/// queued newer jobs are skipped over so we always work on the freshest cover.
+#[cfg(target_os = "linux")]
+fn start_pict_worker(state: ApiState) -> flume::Sender<PictJob> {
+    let (tx, rx) = flume::unbounded::<PictJob>();
+    thread::spawn(move || {
+        while let Ok(mut job) = rx.recv() {
+            while let Ok(newer) = rx.try_recv() {
+                job = newer;
+            }
+
+            let colors = audioleaf::now_playing::extract_prominent_colors_from_bytes(&job.bytes)
+                .unwrap_or_default();
+
+            let applied = {
+                let mut guard = state.now_playing.lock();
+                if guard.artwork_generation == job.generation {
+                    guard.palette_colors = colors;
+                    true
+                } else {
+                    false
+                }
+            };
+            if applied {
+                update_idle_state(&state);
+            }
+        }
+    });
+    tx
+}
+
 /// Shairport Sync writes a stream of `<item>` elements to the metadata pipe.
 /// Each item looks like:
 ///   <item><type>636f7265</type><code>61736172</code><length>26</length>
@@ -1357,6 +1442,7 @@ async fn run_live_visualizer_watchdog_tick(state: &ApiState) -> Result<(), ApiEr
 fn process_shairport_metadata_stream<R: BufRead>(
     state: &ApiState,
     reader: R,
+    pict_tx: &flume::Sender<PictJob>,
 ) -> std::result::Result<(), String> {
     let mut xml = XmlReader::from_reader(reader);
     xml.config_mut().check_end_names = false;
@@ -1433,15 +1519,31 @@ fn process_shairport_metadata_stream<R: BufRead>(
                             .map(|s| s.to_ascii_lowercase())
                             .unwrap_or_default();
                         let code = decode_fourcc(&cur.code_hex).unwrap_or_default();
-                        let payload = if cur.has_data && !cur.encoded.is_empty() {
-                            base64::engine::general_purpose::STANDARD
-                                .decode(cur.encoded.as_bytes())
-                                .unwrap_or_default()
-                        } else {
-                            Vec::new()
-                        };
                         if !item_type.is_empty() && !code.is_empty() {
-                            apply_metadata_item_to_state(state, &item_type, &code, payload);
+                            match metadata_code_disposition(&item_type, &code) {
+                                MetadataDisposition::Skip => {}
+                                MetadataDisposition::NoPayload => {
+                                    apply_metadata_item_to_state(
+                                        state,
+                                        &item_type,
+                                        &code,
+                                        Vec::new(),
+                                        pict_tx,
+                                    );
+                                }
+                                MetadataDisposition::Decode => {
+                                    let payload = if cur.has_data && !cur.encoded.is_empty() {
+                                        base64::engine::general_purpose::STANDARD
+                                            .decode(cur.encoded.as_bytes())
+                                            .unwrap_or_default()
+                                    } else {
+                                        Vec::new()
+                                    };
+                                    apply_metadata_item_to_state(
+                                        state, &item_type, &code, payload, pict_tx,
+                                    );
+                                }
+                            }
                         }
                     }
                     cur = Cursor::default();
@@ -1462,7 +1564,13 @@ fn process_shairport_metadata_stream<R: BufRead>(
 }
 
 #[cfg(target_os = "linux")]
-fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, payload: Vec<u8>) {
+fn apply_metadata_item_to_state(
+    state: &ApiState,
+    item_type: &str,
+    code: &str,
+    payload: Vec<u8>,
+    pict_tx: &flume::Sender<PictJob>,
+) {
     let payload_text = payload_bytes_to_string(&payload);
 
     let mut guard = state.now_playing.lock();
@@ -1510,14 +1618,19 @@ fn apply_metadata_item_to_state(state: &ApiState, item_type: &str, code: &str, p
             "snua" => guard.track.user_agent = payload_text,
             "clip" | "conn" => guard.track.source_ip = payload_text,
             "PICT" if !payload.is_empty() => {
-                let colors = extract_prominent_colors(&payload).unwrap_or_default();
                 guard.artwork_mime_type = detect_image_mime_type(&payload).map(str::to_string);
+                let new_generation = guard.artwork_generation.saturating_add(1);
+                guard.artwork_generation = new_generation;
+                // Clone for the worker; the state retains its own copy via
+                // `artwork_bytes` so /api/now-playing/artwork serves immediately.
+                // palette_colors is intentionally NOT cleared — old colors stay
+                // visible until the worker computes the new palette.
+                let job_bytes = payload.clone();
                 guard.artwork_bytes = Some(payload);
-                guard.artwork_generation = guard.artwork_generation.saturating_add(1);
-                guard.palette_colors = colors;
-                // The decision of whether to drive the visualizer from
-                // these colors lives in update_idle_state, called below
-                // after the lock is released.
+                let _ = pict_tx.send(PictJob {
+                    generation: new_generation,
+                    bytes: job_bytes,
+                });
             }
             // Playback state transitions
             "pbeg" => {

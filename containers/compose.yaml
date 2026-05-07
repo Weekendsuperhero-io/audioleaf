@@ -28,3 +28,9 @@ services:
       - audio
     volumes:
       - ${AUDIOLEAF_CONFIG_DIR:-./config}:/root/.config/audioleaf
+      # Diagnostic overrides — mount host copies on top of the published image so
+      # we can iterate on entrypoint/shairport config + run diag.sh without rebuild.
+      # Remove this block once root cause is captured.
+      - ./entrypoint.sh:/usr/local/bin/entrypoint.sh:ro,Z
+      - ./diag.sh:/usr/local/bin/diag.sh:ro,Z
+      - ../piWebServer/shairport-sync.conf:/etc/shairport-sync.conf:ro,Z
