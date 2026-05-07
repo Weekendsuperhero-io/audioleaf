@@ -20,6 +20,8 @@ use quick_xml::Reader as XmlReader;
 #[cfg(target_os = "linux")]
 use quick_xml::events::Event as XmlEvent;
 use serde::{Deserialize, Serialize};
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use std::thread;
 #[cfg(target_os = "linux")]
 use std::{
     fs::OpenOptions,
@@ -29,7 +31,6 @@ use std::{
     net::SocketAddr,
     path::PathBuf,
     sync::Arc,
-    thread,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::task::JoinError;
@@ -1267,6 +1268,12 @@ fn start_now_playing_reader(state: &ApiState) {
             thread::sleep(Duration::from_secs(3600));
         }
     });
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn start_now_playing_reader(_state: &ApiState) {
+    // No platform-specific now-playing source on Windows / other targets.
+    // The API still serves cached snapshots; the reader is just a no-op.
 }
 
 #[cfg(target_os = "linux")]
