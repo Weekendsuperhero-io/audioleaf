@@ -679,12 +679,6 @@ async fn put_visualizer_palette(
 
     let colors = resolve_palette_colors_async(&state, Some(payload.palette_name.clone())).await;
     let paths = resolve_paths(&state)?;
-    // Picking a palette implies leaving artwork-idle if we were in it.
-    send_live_message_with_recovery(
-        &state,
-        audioleaf::visualizer::VisualizerMsg::SetIdleColor(None),
-    )
-    .await?;
     send_live_message_with_recovery(
         &state,
         audioleaf::visualizer::VisualizerMsg::SetPalette(colors),
@@ -728,19 +722,22 @@ async fn put_visualizer_color_source(
                     .await;
             send_live_message_with_recovery(
                 &state,
-                audioleaf::visualizer::VisualizerMsg::SetIdleColor(None),
-            )
-            .await?;
-            send_live_message_with_recovery(
-                &state,
                 audioleaf::visualizer::VisualizerMsg::SetPalette(colors),
             )
             .await?;
         }
         audioleaf::config::ColorSourceKind::Artwork => {
-            // Idle controller decides idle vs artwork-driven from current
-            // playback / artwork state.
-            update_idle_state_async(&state).await;
+            // If we already have artwork colors cached, push them now. Otherwise
+            // leave the panels on whatever palette is current — the next now-
+            // playing update will swap in artwork colors via apply_artwork_palette.
+            let colors = state.now_playing.lock().palette_colors.clone();
+            if !colors.is_empty() {
+                send_live_message_with_recovery(
+                    &state,
+                    audioleaf::visualizer::VisualizerMsg::SetPalette(colors),
+                )
+                .await?;
+            }
         }
     }
 
@@ -1257,10 +1254,7 @@ fn start_now_playing_reader(state: &ApiState) {
                 }
             }
 
-            // Re-evaluate idle/artwork state from the freshly-updated artwork
-            // and playback fields. Decides whether to push SetIdleColor or
-            // SetPalette to the visualizer.
-            update_idle_state(&state_clone);
+            apply_artwork_palette(&state_clone);
         });
 
         // Block to keep the subscriber alive
@@ -1430,7 +1424,7 @@ fn start_pict_worker(state: ApiState) -> flume::Sender<PictJob> {
                 }
             };
             if applied {
-                update_idle_state(&state);
+                apply_artwork_palette(&state);
             }
         }
     });
@@ -1675,9 +1669,9 @@ fn apply_metadata_item_to_state(
 
     drop(guard);
 
-    // Idle/artwork state may have changed (PICT, playback transition, prgr).
-    // Recompute and emit SetIdleColor / SetPalette if needed.
-    update_idle_state(state);
+    // Cover art may have just landed (PICT). Push artwork colors live if
+    // color_source = Artwork; otherwise the previous palette persists.
+    apply_artwork_palette(state);
 }
 
 #[cfg(target_os = "linux")]
@@ -1953,63 +1947,30 @@ async fn resolve_palette_colors_async(state: &ApiState, name: Option<String>) ->
         .unwrap_or_default()
 }
 
-/// Async wrapper around [`update_idle_state`]. Errors are already swallowed
-/// inside; we just need to keep the blocking work off tokio workers.
-async fn update_idle_state_async(state: &ApiState) {
-    let state = state.clone();
-    let _ = tokio::task::spawn_blocking(move || update_idle_state(&state)).await;
-}
-
-/// Compute whether the visualizer should be in "idle white" state right now,
-/// and apply the transition (send SetIdleColor / SetPalette as appropriate).
-/// Idle when: color_source = Artwork AND no artwork colors AND not playing.
-fn update_idle_state(state: &ApiState) {
+/// When color_source = Artwork and we have artwork colors cached, push them
+/// as the live palette. Otherwise no-op — the visualizer keeps whatever
+/// palette it had last (no flash to white between songs).
+fn apply_artwork_palette(state: &ApiState) {
     let config = match get_runtime_config_clone(state) {
         Ok(c) => c,
         Err(_) => return,
     };
-    let is_artwork_mode = matches!(
+    if !matches!(
         config.visualizer_config.color_source,
         Some(audioleaf::config::ColorSourceKind::Artwork)
-    );
-
-    let (artwork_present, is_playing) = {
-        let guard = state.now_playing.lock();
-        (
-            !guard.palette_colors.is_empty(),
-            matches!(guard.playback_state, PlaybackState::Playing),
-        )
-    };
-
-    let should_idle = is_artwork_mode && (!artwork_present || !is_playing);
-
+    ) {
+        return;
+    }
+    let colors = state.now_playing.lock().palette_colors.clone();
+    if colors.is_empty() {
+        return;
+    }
     let Ok(Some(runtime)) = current_live_visualizer(state) else {
         return;
     };
-    if should_idle {
-        let _ = runtime
-            .sender
-            .send(audioleaf::visualizer::VisualizerMsg::SetIdleColor(Some(
-                audioleaf::constants::IDLE_WHITE_RGB,
-            )));
-    } else {
-        // Exit idle: clear the flag and re-apply whichever palette is current
-        // so the audio pipeline has the right base colors to drive.
-        let _ = runtime
-            .sender
-            .send(audioleaf::visualizer::VisualizerMsg::SetIdleColor(None));
-        let colors = if is_artwork_mode {
-            // Use artwork colors (we know it's present from the check above)
-            state.now_playing.lock().palette_colors.clone()
-        } else {
-            resolve_palette_colors(state, config.visualizer_config.palette_name.as_deref())
-        };
-        if !colors.is_empty() {
-            let _ = runtime
-                .sender
-                .send(audioleaf::visualizer::VisualizerMsg::SetPalette(colors));
-        }
-    }
+    let _ = runtime
+        .sender
+        .send(audioleaf::visualizer::VisualizerMsg::SetPalette(colors));
 }
 
 fn update_runtime_config<F>(
@@ -2274,8 +2235,8 @@ fn build_live_visualizer(state: &ApiState) -> Result<LiveVisualizerRuntime, ApiE
     let initial_hues = match config.visualizer_config.color_source {
         Some(audioleaf::config::ColorSourceKind::Artwork) => {
             // Use any current artwork colors; otherwise an empty Vec triggers
-            // the visualizer's own DEFAULT_COLORS fallback (panels go to idle
-            // white shortly after, via update_idle_state).
+            // the visualizer's own DEFAULT_COLORS fallback. Subsequent now-
+            // playing updates push artwork colors live via apply_artwork_palette.
             state.now_playing.lock().palette_colors.clone()
         }
         _ => resolve_palette_colors(state, config.visualizer_config.palette_name.as_deref()),

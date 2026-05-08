@@ -146,9 +146,6 @@ pub enum VisualizerMsg {
         sort_secondary: crate::config::Sort,
         global_orientation: u16,
     },
-    /// Enter idle mode (Some) — panels hold a static color, audio pipeline is
-    /// suppressed. Exit idle (None) — audio-driven animation resumes.
-    SetIdleColor(Option<[u8; 3]>),
 }
 
 pub struct Visualizer {
@@ -165,10 +162,6 @@ pub struct Visualizer {
     effect: Effect,
     color_subscribers: Vec<flume::Sender<HashMap<u16, [u8; 3]>>>,
     stream_health: Option<Arc<Mutex<StreamHealth>>>,
-    /// When Some, the audio pipeline still runs but its panel updates are
-    /// suppressed; the inner static frame at this color is the only thing the
-    /// Nanoleaf sees. Set/cleared by `VisualizerMsg::SetIdleColor`.
-    idle_color: Option<[u8; 3]>,
 }
 
 impl Visualizer {
@@ -241,7 +234,6 @@ impl Visualizer {
             effect,
             color_subscribers,
             stream_health: None,
-            idle_color: None,
         })
     }
 
@@ -257,20 +249,6 @@ impl Visualizer {
     fn send_black_frame(&self, n_panels: usize) {
         let black = vec![Oklch::new(0.0, 0.0, 0.0); n_panels];
         let _ = self.nl_udp.update_panels(&black, 0);
-    }
-
-    /// Push a single solid-color frame to every panel. Used by idle mode (and
-    /// could be reused for any "static color" use case). Nanoleaf retains the
-    /// frame, so a one-shot send is enough — we don't need to keep refreshing.
-    fn send_static_frame(&self, rgb: [u8; 3], n_panels: usize) {
-        let srgb: Srgb = Srgb::new(
-            rgb[0] as f32 / 255.0,
-            rgb[1] as f32 / 255.0,
-            rgb[2] as f32 / 255.0,
-        );
-        let oklch = Oklch::from_color(srgb);
-        let frame = vec![oklch; n_panels];
-        let _ = self.nl_udp.update_panels(&frame, 0);
     }
 
     /// Updates visualizer internal state or parameters based on received message.
@@ -344,18 +322,6 @@ impl Visualizer {
                 brightness.fill(0.0);
                 // Immediately send a black frame so the old sort order's colors don't linger
                 self.send_black_frame(base_colors.len());
-            }
-            VisualizerMsg::SetIdleColor(maybe_color) => {
-                self.idle_color = maybe_color;
-                if let Some(rgb) = maybe_color {
-                    // Push the static frame once — Nanoleaf retains it.
-                    self.send_static_frame(rgb, base_colors.len());
-                    // Reset audio state so the moment we exit idle, audio
-                    // starts driving from zero rather than wherever it left off.
-                    brightness.fill(0.0);
-                    prev_max.fill(0.0);
-                    speed.fill(0.0);
-                }
             }
         }
     }
@@ -809,14 +775,10 @@ impl Visualizer {
                 .zip(brightness.iter())
                 .map(|(base, &b)| Oklch::new(base.l * b, base.chroma, base.hue))
                 .collect();
-            // While idle, the panels hold the static frame pushed by
-            // SetIdleColor; suppress audio-driven updates so they don't
-            // overwrite it with black (brightness=0 = off).
-            if self.idle_color.is_none()
-                && self
-                    .nl_udp
-                    .update_panels(&display_colors, self.trans_time)
-                    .is_err()
+            if self
+                .nl_udp
+                .update_panels(&display_colors, self.trans_time)
+                .is_err()
                 && self.nl_device.request_udp_control().is_ok()
             {
                 let _ = self.nl_udp.update_panels(&display_colors, self.trans_time);
