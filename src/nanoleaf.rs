@@ -20,6 +20,41 @@ pub struct NlDevice {
     pub token: String,
 }
 
+/// A named palette pulled from a Nanoleaf device's saved effects.
+/// Replaces the static palette catalog that used to live in `src/palettes.rs`.
+#[derive(Clone, Debug, Serialize)]
+pub struct NamedPalette {
+    pub name: String,
+    pub colors: Vec<[u8; 3]>,
+}
+
+/// Nanoleaf palette entries are HSB triples (hue 0-360, saturation 0-100,
+/// brightness 0-100). Convert to sRGB byte triples.
+fn hsb_to_rgb(h: f32, s: f32, b: f32) -> [u8; 3] {
+    let hue = h.rem_euclid(360.0) / 360.0;
+    let sat = (s / 100.0).clamp(0.0, 1.0);
+    let val = (b / 100.0).clamp(0.0, 1.0);
+    // Standard HSV → RGB; Nanoleaf "brightness" semantically matches HSV value.
+    let i = (hue * 6.0).floor() as i32;
+    let f = hue * 6.0 - i as f32;
+    let p = val * (1.0 - sat);
+    let q = val * (1.0 - f * sat);
+    let t = val * (1.0 - (1.0 - f) * sat);
+    let (r, g, b) = match i.rem_euclid(6) {
+        0 => (val, t, p),
+        1 => (q, val, p),
+        2 => (p, val, t),
+        3 => (p, q, val),
+        4 => (t, p, val),
+        _ => (val, p, q),
+    };
+    [
+        (r * 255.0).round().clamp(0.0, 255.0) as u8,
+        (g * 255.0).round().clamp(0.0, 255.0) as u8,
+        (b * 255.0).round().clamp(0.0, 255.0) as u8,
+    ]
+}
+
 /// wrapper struct for TOML serialization
 #[derive(Debug, Serialize, Deserialize)]
 struct NlDevices {
@@ -234,6 +269,66 @@ impl NlDevice {
         Ok(socket)
     }
 
+    /// Fetch every saved effect from the device with its full palette,
+    /// converted to sRGB triples. One round-trip via PUT /effects
+    /// `{"write":{"command":"requestAll"}}`. Skips effects with empty palettes.
+    pub fn list_effect_palettes(&self) -> Result<Vec<NamedPalette>> {
+        let body = json!({ "write": { "command": "requestAll" } });
+        let Ok(res) = utils::request_put(
+            &format!(
+                "http://{}:{}/api/v1/{}/effects",
+                self.ip,
+                constants::NL_API_PORT,
+                self.token
+            ),
+            Some(&body),
+        ) else {
+            bail!(utils::generate_connection_error_msg(&self.ip));
+        };
+        let json: serde_json::Value = serde_json::from_str(&res)?;
+
+        // Newer firmwares wrap the array in {"animations": [...]}; older or
+        // simulator builds return the raw JSON-array as a string. Try both.
+        let animations: Vec<serde_json::Value> = match json.get("animations") {
+            Some(serde_json::Value::Array(arr)) => arr.clone(),
+            _ => match json.as_array() {
+                Some(arr) => arr.clone(),
+                None => bail!("Unexpected /effects response shape: missing animations array"),
+            },
+        };
+
+        let mut out = Vec::with_capacity(animations.len());
+        for anim in animations {
+            let Some(name) = anim.get("animName").and_then(|v| v.as_str()) else {
+                continue;
+            };
+            let Some(palette) = anim.get("palette").and_then(|v| v.as_array()) else {
+                continue;
+            };
+            let mut colors = Vec::with_capacity(palette.len());
+            for entry in palette {
+                let h = entry.get("hue").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let s = entry
+                    .get("saturation")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                let b = entry
+                    .get("brightness")
+                    .and_then(|v| v.as_f64())
+                    .unwrap_or(0.0);
+                colors.push(hsb_to_rgb(h as f32, s as f32, b as f32));
+            }
+            if colors.is_empty() {
+                continue;
+            }
+            out.push(NamedPalette {
+                name: name.to_string(),
+                colors,
+            });
+        }
+        Ok(out)
+    }
+
     pub fn request_udp_control(&self) -> Result<()> {
         let data = json!({
             "write": {
@@ -276,6 +371,15 @@ impl NlDevice {
             Some(device) => Ok(device),
             None => bail!(format!("Nanoleaf device `{}` not found", device_name)),
         }
+    }
+
+    #[allow(dead_code)]
+    pub fn all_from_file(path: &Path) -> Result<Vec<Self>> {
+        let mut devices_file = File::open(path)?;
+        let mut contents = String::new();
+        devices_file.read_to_string(&mut contents)?;
+        let devices: NlDevices = toml::from_str(&contents)?;
+        Ok(devices.nl_devices)
     }
 
     pub fn append_to_file(&self, path: &Path) -> Result<()> {

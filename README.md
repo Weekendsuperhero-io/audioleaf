@@ -70,6 +70,69 @@ To connect to a specific device:
 audioleaf -d "Shapes AC01"
 ```
 
+### Web Control Panel (Axum + React)
+
+Audioleaf now includes an HTTP API and a Vite/React control panel scaffold.
+
+Start the API server:
+
+```bash
+cargo run --bin audioleaf-api
+```
+
+The API process also starts a live visualizer engine (using your saved config), so web effect/palette/settings changes apply to panels immediately. Web updates modify the running state and are not auto-written to `config.toml`.
+
+In a second terminal, start the web app:
+
+```bash
+cd web
+pnpm install
+pnpm dev
+```
+
+The Vite dev server runs at `http://127.0.0.1:5173` and proxies `/api/*` to `http://127.0.0.1:8787`.
+
+Current API routes:
+
+- `GET /api/health`
+- `GET /api/config`
+- `POST /api/config/save` (persist current runtime config to `config.toml`)
+- `PUT /api/config/visualizer/effect` (`effect`: Spectrum | EnergyWave | Pulse)
+- `PUT /api/config/visualizer/palette` (`palette_name`: preset name)
+- `PUT /api/config/visualizer/sort` (`primary_axis`, `sort_primary`, `sort_secondary`)
+- `PUT /api/config/visualizer/settings` (`audio_backend`, `freq_range`, `default_gain`, `transition_time`, `time_window`)
+- `GET /api/now-playing` (latest Shairport track metadata + extracted artwork colors)
+- `PUT /api/now-playing/settings` (`drive_visualizer_palette`)
+- `GET /api/now-playing/artwork` (latest album artwork image bytes)
+- `GET /api/visualizer/preview` (live panel colors from running visualizer)
+- `GET /api/audio/backends`
+- `GET /api/devices`
+- `GET /api/devices/{name}/info`
+- `GET /api/devices/{name}/layout`
+- `PUT /api/devices/{name}/state` (`power_on` and/or `brightness` 0-100)
+- `GET /api/palettes`
+
+#### Shairport Sync Metadata Setup
+
+To power the web "Now Playing" panel from AirPlay metadata, enable metadata in `shairport-sync.conf`:
+
+```conf
+metadata =
+{
+  enabled = "yes";
+  include_cover_art = "yes";
+  pipe_name = "/tmp/shairport-sync-metadata";
+};
+```
+
+If you use a different metadata pipe path, set:
+
+```bash
+export AUDIOLEAF_SHAIRPORT_METADATA_PIPE=/absolute/path/to/your/pipe
+```
+
+before starting `audioleaf-api`.
+
 ### Controls
 
 Press <kbd>?</kbd> in the app to see all keybinds.
@@ -111,7 +174,7 @@ default_nl_device_name = "Shapes AC01"
 
 [visualizer_config]
 # Audio input device (see Audio Setup below)
-audio_backend = "BlackHole 2ch"
+audio_backend = "default"
 
 # Frequency range to visualize [min_hz, max_hz]
 freq_range = [20, 4500]
@@ -173,6 +236,100 @@ effect = "Spectrum"        # "Spectrum", "EnergyWave", or "Pulse"
 2. Open `pavucontrol` (PulseAudio Volume Control)
 3. In the **Recording** tab, set audioleaf's input to your media player's monitor
 4. Set `audio_backend` in config.toml to match
+
+### Raspberry Pi — Container (Recommended)
+
+Ship audioleaf, `nqptp`, and `shairport-sync` (with AirPlay 2) as a single
+prebuilt OCI image. The setup script at `pi/setup.sh` handles podman install,
+group memberships, the `snd-aloop` kernel module, fetching the compose file,
+and (optionally) the systemd unit.
+
+One-shot from a fresh Pi:
+```bash
+curl -fsSL https://raw.githubusercontent.com/Weekendsuperhero/audioleaf/main/pi/setup.sh \
+  | sudo bash
+```
+
+Or from a clone:
+```bash
+sudo ./pi/setup.sh
+```
+
+Flags:
+- `--no-systemd` — skip the systemd unit; just `compose up -d`
+- `--no-deploy` — host prep only, don't pull/start the container
+- `--force-compose` — overwrite `/etc/audioleaf/compose.yaml`
+- `--config-dir=DIR` — override `/etc/audioleaf`
+
+After install:
+- Web UI: `http://<pi-ip>:8787`
+- Pair Nanoleaf devices, AirPlay to "Audioleaf Pi"
+- Log out and back in once if the script added you to new groups
+
+Update to a new release:
+```bash
+cd /etc/audioleaf && sudo podman compose pull && sudo podman compose up -d
+```
+
+Config (`config.toml`, `nl_devices.toml`) lives in `/etc/audioleaf/config/`
+and survives container rebuilds.
+
+### Raspberry Pi — Bare-metal (Legacy)
+
+If you'd rather run native binaries, the legacy installer
+(`install_share_port_sync.sh`) builds `nqptp` and `shairport-sync` from source
+and configures systemd units directly on the host. Slower to install and
+harder to update, but doesn't require Podman.
+
+For AirPlay + live visualizer on Raspberry Pi, use ALSA loopback and keep audioleaf on
+`audio_backend = "default"` so ALSA routing is the single source of truth.
+
+1. Load/persist loopback:
+   ```bash
+   sudo modprobe snd-aloop
+   echo snd-aloop | sudo tee /etc/modules-load.d/snd-aloop.conf
+   echo "options snd-aloop id=Loopback index=2 pcm_substreams=8" \
+     | sudo tee /etc/modprobe.d/snd-aloop.conf
+   ```
+2. Set ALSA default capture mapping in both `/etc/asound.conf` and `~/.asoundrc`:
+   ```conf
+   pcm.audioleaf_in {
+     type plug
+     slave.pcm "hw:Loopback,1,0"
+   }
+
+   pcm.!default {
+     type plug
+     slave.pcm "hw:Loopback,1,0"
+   }
+   ```
+3. Configure `shairport-sync` to output to loopback playback:
+   ```conf
+   general = {
+     output_backend = "alsa";
+   };
+
+   alsa = {
+     output_device = "hw:Loopback,0,0";
+     output_rate = 44100;
+     output_format = "S16_LE";
+     output_channels = 2;
+     use_mmap_if_available = "no";
+   };
+
+   metadata = {
+     enabled = "yes";
+     include_cover_art = "yes";
+     pipe_name = "/tmp/shairport-sync-metadata";
+   };
+   ```
+4. Keep audioleaf backend on default and persist:
+   ```bash
+   curl -sS -X PUT http://127.0.0.1:8787/api/config/visualizer/settings \
+     -H 'content-type: application/json' \
+     -d '{"audio_backend":"default"}'
+   curl -sS -X POST http://127.0.0.1:8787/api/config/save
+   ```
 
 ## Dump Commands
 

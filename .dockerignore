@@ -1,0 +1,13 @@
+.git
+.github
+target
+node_modules
+web/node_modules
+web/dist
+Assets
+test.wav
+*.md
+LICENSE
+.DS_Store
+.idea
+.vscode

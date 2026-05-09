@@ -1,6 +1,5 @@
 use crate::{constants, ssdp, utils};
 use anyhow::{Result, bail};
-use clap::Parser;
 use serde::Serialize;
 use std::fs::File;
 use std::{
@@ -9,50 +8,6 @@ use std::{
     path::{Path, PathBuf},
 };
 use toml::{Table, Value};
-
-#[derive(Parser, Debug)]
-#[command(version, about, author, long_about = None)]
-pub struct CliOptions {
-    /// Path to audioleaf's configuration file
-    #[arg(long = "config")]
-    pub config_file_path: Option<PathBuf>,
-
-    /// Path to audioleaf's database of known Nanoleaf devices
-    #[arg(long = "devices")]
-    pub devices_file_path: Option<PathBuf>,
-
-    /// Name of the Nanoleaf device to connect to (e.g. Canvas 2E50)
-    #[arg(short = 'd', long = "device-name")]
-    pub device_name: Option<String>,
-
-    /// Explicitly add a new Nanoleaf device
-    #[arg(short = 'n', long = "new")]
-    pub add_new: bool,
-
-    #[command(subcommand)]
-    pub command: Option<Command>,
-}
-
-#[derive(Parser, Debug)]
-pub enum Command {
-    /// Dump information from device or configuration
-    Dump {
-        #[command(subcommand)]
-        dump_type: DumpType,
-    },
-}
-
-#[derive(Parser, Debug)]
-pub enum DumpType {
-    /// Dump panel layout information from the device
-    Layout,
-    /// Dump available color palettes
-    Palettes,
-    /// Dump device info from /api/v1/ endpoint (no auth required)
-    Info,
-    /// Show graphical panel layout visualization
-    LayoutGraphical,
-}
 
 #[derive(Copy, Clone, Debug, Default, Serialize)]
 pub enum Axis {
@@ -77,20 +32,37 @@ pub enum Effect {
     /// Brightness pulses with audio energy in that band (fast attack, slow decay).
     #[default]
     Spectrum,
-    /// Audio energy enters from one end and cascades across panels as a traveling wave.
-    /// Creates a flowing ripple effect driven by overall audio amplitude.
+    /// Each panel tracks its own frequency band (like Spectrum) but brightness
+    /// bleeds into neighboring panels, creating a flowing wave across the array.
     EnergyWave,
-    /// All panels pulse together, driven directly by audio transients.
-    /// Very fast attack snaps to each beat; smooth exponential decay fades between hits.
-    /// The music's own rhythm drives the animation — no fixed oscillation.
-    Pulse,
+    /// Onset-triggered pulses propagate outward from panel 0 like ripples on water
+    /// or a starship jumping to warp — bright leading edge stretching into a fading trail.
+    Ripple,
 }
 
-#[derive(Debug, Serialize)]
+/// Where the visualizer pulls its panel colors from.
+///
+/// `Palette { name }` looks up the named effect on the active Nanoleaf device
+/// and uses its palette. `name = None` means "use the device's currently-
+/// selected effect." `Artwork` drives colors from album cover art when audio
+/// is playing, falling back to a static dim white when idle.
+#[derive(Copy, Clone, Debug, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ColorSourceKind {
+    #[default]
+    Palette,
+    Artwork,
+}
+
+#[derive(Clone, Debug, Serialize)]
 pub struct VisualizerConfig {
     pub audio_backend: Option<String>,
     pub freq_range: Option<(u16, u16)>,
-    pub colors: Option<Vec<[u8; 3]>>,
+    pub color_source: Option<ColorSourceKind>,
+    /// Name of a Nanoleaf-side effect whose palette we use. `None` (with
+    /// `color_source = Palette`) means "use the device's currently-selected
+    /// effect." Ignored when `color_source = Artwork`.
+    pub palette_name: Option<String>,
     pub default_gain: Option<f32>,
     pub transition_time: Option<u16>,
     pub time_window: Option<f32>,
@@ -100,30 +72,15 @@ pub struct VisualizerConfig {
     pub effect: Option<Effect>,
 }
 
-impl VisualizerConfig {
-    /// Returns the default visualizer configuration.
-    ///
-    /// Initializes with constants:
-    /// - `audio_backend`: "default"
-    /// - `freq_range`: (20, 4500) Hz
-    /// - `colors`: RGB color array for panel visualization
-    /// - `default_gain`: 1.0
-    /// - `transition_time`: 2 (200ms)
-    /// - `time_window`: 0.1875 s
-    /// - Sorting: Y axis ascending, secondary ascending
-    pub fn default() -> Self {
+impl Default for VisualizerConfig {
+    fn default() -> Self {
         VisualizerConfig {
             audio_backend: Some("default".to_string()),
             freq_range: Some(constants::DEFAULT_FREQ_RANGE),
-            colors: Some(vec![
-                [255, 128, 0],
-                [255, 0, 0],
-                [255, 0, 128],
-                [255, 0, 255],
-                [128, 0, 255],
-                [0, 0, 255],
-                [0, 128, 255],
-            ]),
+            // Defaults: pull palette from whatever effect the device is
+            // currently set to. Users override via the API.
+            color_source: Some(ColorSourceKind::Palette),
+            palette_name: None,
             default_gain: Some(constants::DEFAULT_GAIN),
             transition_time: Some(constants::DEFAULT_TRANSITION_TIME),
             time_window: Some(constants::DEFAULT_TIME_WINDOW),
@@ -135,7 +92,7 @@ impl VisualizerConfig {
     }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Config {
     pub default_nl_device_name: Option<String>,
     pub visualizer_config: VisualizerConfig,
@@ -156,7 +113,7 @@ impl Config {
     ) -> Self {
         Config {
             default_nl_device_name,
-            visualizer_config: visualizer_config.unwrap_or(VisualizerConfig::default()),
+            visualizer_config: visualizer_config.unwrap_or_default(),
         }
     }
 
@@ -202,70 +159,22 @@ impl Config {
                     visualizer_config.freq_range =
                         Some((u16::try_from(low)?, u16::try_from(high)?));
                 }
-                ("colors" | "hues", Value::String(s)) => {
-                    // Named palette support
-                    match crate::palettes::get_palette(&s) {
-                        Some(colors) => visualizer_config.colors = Some(colors),
-                        None => {
-                            let available = crate::palettes::get_palette_names().join(", ");
-                            bail!(
-                                "Unknown palette name '{}'. Available palettes: {}",
-                                s,
-                                available
-                            );
-                        }
-                    }
+                ("color_source", Value::String(s)) => {
+                    let kind = match s.to_ascii_lowercase().as_str() {
+                        "palette" => ColorSourceKind::Palette,
+                        "artwork" => ColorSourceKind::Artwork,
+                        _ => bail!("color_source must be `palette` or `artwork`, got `{}`", s),
+                    };
+                    visualizer_config.color_source = Some(kind);
                 }
-                ("colors" | "hues", Value::Array(v)) => {
-                    if v.is_empty() {
-                        bail!("colors cannot be an empty array");
-                    }
-                    // Detect format: if first element is an integer, treat as legacy hue array;
-                    // if first element is an array, treat as RGB color array.
-                    if v[0].is_integer() {
-                        // Legacy hue format: [30, 0, 330, ...] → convert HSV hues to RGB
-                        let mut colors = Vec::with_capacity(v.len());
-                        for (i, entry) in v.iter().enumerate() {
-                            let Some(hue_val) = entry.as_integer() else {
-                                bail!("hues[{}] must be an integer (0-360)", i);
-                            };
-                            if !(0..=360).contains(&hue_val) {
-                                bail!("hues[{}] must be 0-360, got {}", i, hue_val);
-                            }
-                            if hue_val == 360 {
-                                colors.push([255, 255, 255]); // white
-                            } else {
-                                // Convert HSV hue (S=1, V=1) to RGB
-                                let rgb = hsv_hue_to_rgb(hue_val as f32);
-                                colors.push(rgb);
-                            }
-                        }
-                        visualizer_config.colors = Some(colors);
-                    } else {
-                        // New RGB format: [[255, 0, 0], [0, 255, 0], ...]
-                        let mut colors = Vec::with_capacity(v.len());
-                        for (i, entry) in v.iter().enumerate() {
-                            let Some(rgb_arr) = entry.as_array() else {
-                                bail!("colors[{}] must be a [R, G, B] array", i);
-                            };
-                            if rgb_arr.len() != 3 {
-                                bail!("colors[{}] must be a 3-element [R, G, B] array", i);
-                            }
-                            let mut rgb = [0u8; 3];
-                            for (j, component) in rgb_arr.iter().enumerate() {
-                                let Some(val) = component.as_integer() else {
-                                    bail!("colors[{}][{}] must be an integer (0-255)", i, j);
-                                };
-                                if !(0..=255).contains(&val) {
-                                    bail!("colors[{}][{}] must be 0-255, got {}", i, j, val);
-                                }
-                                rgb[j] = val as u8;
-                            }
-                            colors.push(rgb);
-                        }
-                        visualizer_config.colors = Some(colors);
-                    }
+                ("palette_name", Value::String(s)) => {
+                    visualizer_config.palette_name = Some(s);
                 }
+                // Legacy keys removed by migrate_obsolete_fields() before parse.
+                // If they survive (e.g. external write), silently drop them
+                // rather than failing — we don't want a stale field to brick
+                // startup.
+                ("colors" | "hues", _) => {}
                 ("default_gain", Value::Float(x)) => {
                     #[cfg(debug_assertions)]
                     eprintln!("DEBUG: Parsed default_gain as Float: {}", x);
@@ -324,12 +233,12 @@ impl Config {
                     let effect = match s.as_str() {
                         "Spectrum" | "spectrum" => Some(Effect::Spectrum),
                         "EnergyWave" | "energy_wave" | "energy-wave" => Some(Effect::EnergyWave),
-                        "Pulse" | "pulse" => Some(Effect::Pulse),
+                        "Ripple" | "ripple" => Some(Effect::Ripple),
                         _ => None,
                     };
                     if effect.is_none() {
                         bail!(
-                            "effect must be `Spectrum`, `EnergyWave`, or `Pulse`, got `{}`",
+                            "effect must be `Spectrum`, `EnergyWave`, or `Ripple`, got `{}`",
                             s
                         );
                     };
@@ -365,9 +274,54 @@ impl Config {
     /// # Errors
     ///
     /// File I/O errors, TOML deserialization failures, or validation bails.
+    ///
+    /// One-shot migration: if the on-disk config still has obsolete `colors`
+    /// or `hues` fields under `[visualizer_config]`, strip them and rewrite
+    /// the file. Uses `toml_edit` so comments, key order, and whitespace
+    /// outside the removed lines are preserved. No-op if neither key is
+    /// present.
+    fn migrate_obsolete_fields(path: &Path) -> Result<()> {
+        let mut contents = String::new();
+        File::open(path)?.read_to_string(&mut contents)?;
+
+        let mut doc: toml_edit::DocumentMut = match contents.parse() {
+            Ok(d) => d,
+            // If the file isn't valid TOML, let the main parser produce a
+            // proper error — we don't want to mangle a half-broken file.
+            Err(_) => return Ok(()),
+        };
+
+        let mut removed = Vec::new();
+        if let Some(item) = doc.get_mut("visualizer_config")
+            && let Some(table) = item.as_table_mut()
+        {
+            for legacy in ["colors", "hues"] {
+                if table.remove(legacy).is_some() {
+                    removed.push(legacy);
+                }
+            }
+        }
+
+        if !removed.is_empty() {
+            let new_contents = doc.to_string();
+            std::fs::write(path, new_contents)?;
+            eprintln!(
+                "INFO: migrated {} — removed obsolete inline {}; palettes now come from the Nanoleaf device.",
+                path.display(),
+                removed.join(" and ")
+            );
+        }
+        Ok(())
+    }
+
     pub fn parse_from_file(path: &Path) -> Result<Self> {
         #[cfg(debug_assertions)]
         eprintln!("DEBUG: Reading config from: {}", path.display());
+        // Strip obsolete fields from the on-disk file before parse. After this
+        // returns, the file is guaranteed not to contain `colors` / `hues` in
+        // [visualizer_config], regardless of what was there before.
+        Self::migrate_obsolete_fields(path)?;
+
         let mut config_file = File::open(path)?;
         let mut contents = String::new();
         config_file.read_to_string(&mut contents)?;
@@ -471,24 +425,6 @@ pub fn resolve_paths(
         (config_file_path, config_file_exists),
         (devices_file_path, devices_file_exists),
     ))
-}
-
-/// Converts an HSV hue (with S=1, V=1) to an RGB triplet.
-///
-/// Used for backwards compatibility with legacy config files that specify
-/// colors as hue angles (0-360) instead of RGB arrays.
-fn hsv_hue_to_rgb(hue: f32) -> [u8; 3] {
-    let h = hue / 60.0;
-    let x = 1.0 - (h % 2.0 - 1.0).abs();
-    let (r, g, b) = match h as u32 {
-        0 => (1.0, x, 0.0),
-        1 => (x, 1.0, 0.0),
-        2 => (0.0, 1.0, x),
-        3 => (0.0, x, 1.0),
-        4 => (x, 0.0, 1.0),
-        _ => (1.0, 0.0, x),
-    };
-    [(r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8]
 }
 
 /// Interactively discovers Nanoleaf devices via SSDP or accepts manual IP input.

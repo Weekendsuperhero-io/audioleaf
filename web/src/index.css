@@ -1,0 +1,64 @@
+@import "tailwindcss";
+
+@theme inline {
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+  --color-destructive: hsl(var(--destructive));
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+
+  --radius-sm: 0.4rem;
+  --radius-md: 0.6rem;
+  --radius-lg: 0.8rem;
+
+  --font-sans: "Space Grotesk", "IBM Plex Sans", "Avenir Next", sans-serif;
+  --font-display: "Sora", "Avenir Next Condensed", sans-serif;
+  --shadow-card: 0 12px 30px rgba(4, 23, 33, 0.08);
+}
+
+:root {
+  --background: 38 40% 96%;
+  --foreground: 203 32% 12%;
+  --card: 0 0% 100%;
+  --card-foreground: 203 32% 12%;
+  --primary: 176 82% 28%;
+  --primary-foreground: 0 0% 98%;
+  --secondary: 188 28% 91%;
+  --secondary-foreground: 203 32% 16%;
+  --muted: 44 20% 90%;
+  --muted-foreground: 201 12% 37%;
+  --accent: 20 88% 90%;
+  --accent-foreground: 14 50% 24%;
+  --destructive: 0 84% 52%;
+  --border: 190 24% 82%;
+  --input: 190 24% 82%;
+  --ring: 176 82% 28%;
+}
+
+* {
+  @apply border-border;
+}
+
+body {
+  @apply bg-background text-foreground font-sans;
+  margin: 0;
+  background-image:
+    radial-gradient(circle at 12% 10%, rgba(62, 184, 171, 0.28), transparent 44%),
+    radial-gradient(circle at 88% 82%, rgba(255, 164, 88, 0.3), transparent 36%),
+    linear-gradient(165deg, #f7f2e6 0%, #eef3ef 45%, #e5f2f1 100%);
+}
+
+code {
+  font-family: "IBM Plex Mono", "SFMono-Regular", Menlo, monospace;
+}

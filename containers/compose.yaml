@@ -1,0 +1,42 @@
+# Podman compose for audioleaf on Raspberry Pi.
+#
+# For systemd integration we ship a Quadlet at containers/audioleaf.container —
+# this compose file is for ad-hoc / dev runs without systemd.
+#
+# Pi prerequisites are handled by pi/setup.sh, but if you're doing it by hand:
+#   echo snd-aloop | sudo tee /etc/modules-load.d/snd-aloop.conf
+#   echo "options snd-aloop id=Loopback index=2 pcm_substreams=8" \
+#     | sudo tee /etc/modprobe.d/snd-aloop.conf
+#   sudo modprobe snd-aloop
+#
+# Run:
+#   podman compose -f containers/compose.yaml up -d
+
+services:
+  audioleaf:
+    image: ghcr.io/weekendsuperhero-io/audioleaf:latest
+    container_name: audioleaf
+    network_mode: host
+    restart: unless-stopped
+    # nqptp binds UDP 319/320 for PTP; shairport needs NET_ADMIN for RT scheduling
+    cap_add:
+      - NET_BIND_SERVICE
+      - NET_ADMIN
+    devices:
+      - /dev/snd:/dev/snd
+    group_add:
+      - audio
+    volumes:
+      - ${AUDIOLEAF_CONFIG_DIR:-./config}:/root/.config/audioleaf
+      # Share the host's dbus + avahi so shairport-sync registers AirPlay via
+      # the host's avahi-daemon instead of running its own. With network_mode:
+      # host, two avahi-daemons on the same network collide on the mDNS
+      # hostname, producing a "Host name conflict, retrying with HOST-N" loop.
+      - /var/run/dbus:/var/run/dbus
+      - /var/run/avahi-daemon:/var/run/avahi-daemon
+      # Diagnostic overrides — mount host copies on top of the published image so
+      # we can iterate on entrypoint/shairport config + run diag.sh without rebuild.
+      # Remove this block once root cause is captured.
+      - ./entrypoint.sh:/usr/local/bin/entrypoint.sh:ro,Z
+      - ./diag.sh:/usr/local/bin/diag.sh:ro,Z
+      - ../piWebServer/shairport-sync.conf:/etc/shairport-sync.conf:ro,Z
