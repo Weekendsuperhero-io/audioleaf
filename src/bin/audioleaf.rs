@@ -1417,14 +1417,27 @@ fn start_pict_worker(state: ApiState) -> flume::Sender<PictJob> {
             let applied = {
                 let mut guard = state.now_playing.lock();
                 if guard.artwork_generation == job.generation {
-                    guard.palette_colors = colors;
+                    guard.palette_colors = colors.clone();
                     true
                 } else {
                     false
                 }
             };
             if applied {
+                // TODO: remove after song-change bug confirmed
+                eprintln!(
+                    "INFO: PICT worker sending SetPalette gen={} colors={}",
+                    job.generation,
+                    colors.len()
+                );
                 apply_artwork_palette(&state);
+            } else {
+                // TODO: remove after song-change bug confirmed
+                eprintln!(
+                    "INFO: PICT worker dropped result (newer PICT arrived) gen={} colors={}",
+                    job.generation,
+                    colors.len()
+                );
             }
         }
     });
@@ -1574,6 +1587,7 @@ fn apply_metadata_item_to_state(
 ) {
     let payload_text = payload_bytes_to_string(&payload);
 
+    let mut session_ended = false;
     let mut guard = state.now_playing.lock();
     guard.reader_running = true;
     guard.last_error = None;
@@ -1643,6 +1657,7 @@ fn apply_metadata_item_to_state(
             "pend" | "disc" => {
                 guard.playback_state = PlaybackState::Stopped;
                 guard.clear_session_data();
+                session_ended = true;
             }
             // Progress: "start/current/end" RTP timestamps at 44100 Hz.
             // shairport sends this at stream start and on flush events; we
@@ -1668,6 +1683,13 @@ fn apply_metadata_item_to_state(
     }
 
     drop(guard);
+
+    // AirPlay session just ended — push panels to black and keep them there
+    // until a new SetPalette arrives (next session's first PICT).
+    if session_ended {
+        send_blackout(state);
+        return;
+    }
 
     // Cover art may have just landed (PICT). Push artwork colors live if
     // color_source = Artwork; otherwise the previous palette persists.
@@ -1966,11 +1988,35 @@ fn apply_artwork_palette(state: &ApiState) {
         return;
     }
     let Ok(Some(runtime)) = current_live_visualizer(state) else {
+        eprintln!(
+            "WARN: apply_artwork_palette: no live visualizer (colors={})",
+            colors.len()
+        );
+        return;
+    };
+    let n = colors.len();
+    if let Err(err) = runtime
+        .sender
+        .send(audioleaf::visualizer::VisualizerMsg::SetPalette(colors))
+    {
+        // TODO: remove after song-change bug confirmed
+        eprintln!("WARN: SetPalette send failed n={} err={}", n, err);
+    } else {
+        // TODO: remove after song-change bug confirmed
+        eprintln!("INFO: SetPalette sent n={}", n);
+    }
+}
+
+/// Send a Blackout to the live visualizer. Panels go dark and stay dark until
+/// the next SetPalette. Used on AirPlay session end (Linux/shairport only).
+#[cfg(target_os = "linux")]
+fn send_blackout(state: &ApiState) {
+    let Ok(Some(runtime)) = current_live_visualizer(state) else {
         return;
     };
     let _ = runtime
         .sender
-        .send(audioleaf::visualizer::VisualizerMsg::SetPalette(colors));
+        .send(audioleaf::visualizer::VisualizerMsg::Blackout);
 }
 
 fn update_runtime_config<F>(

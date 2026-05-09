@@ -146,6 +146,9 @@ pub enum VisualizerMsg {
         sort_secondary: crate::config::Sort,
         global_orientation: u16,
     },
+    /// Hold panels black; suppress audio-driven panel writes until a
+    /// SetPalette message clears the state. Used on AirPlay disconnect.
+    Blackout,
 }
 
 pub struct Visualizer {
@@ -162,6 +165,9 @@ pub struct Visualizer {
     effect: Effect,
     color_subscribers: Vec<flume::Sender<HashMap<u16, [u8; 3]>>>,
     stream_health: Option<Arc<Mutex<StreamHealth>>>,
+    /// While true, the audio pump skips panel writes — panels stay on the
+    /// last static frame (typically black). Cleared by `SetPalette`.
+    suppress_audio_output: bool,
 }
 
 impl Visualizer {
@@ -234,6 +240,7 @@ impl Visualizer {
             effect,
             color_subscribers,
             stream_health: None,
+            suppress_audio_output: false,
         })
     }
 
@@ -287,9 +294,16 @@ impl Visualizer {
                 self.send_black_frame(base_colors.len());
             }
             VisualizerMsg::SetPalette(new_colors) => {
+                eprintln!(
+                    "INFO: visualizer received SetPalette n={}",
+                    new_colors.len()
+                );
                 self.hues = new_colors;
                 *base_colors = utils::colors_from_rgb(&self.hues, base_colors.len());
                 brightness.fill(0.0);
+                // Coming back from a Blackout (e.g. AirPlay reconnect) — let
+                // the audio pump drive panels again.
+                self.suppress_audio_output = false;
                 // Immediately send a black frame so the old palette's colors don't linger
                 self.send_black_frame(base_colors.len());
             }
@@ -321,6 +335,13 @@ impl Visualizer {
                 brightness.resize(base_colors.len(), 0.0);
                 brightness.fill(0.0);
                 // Immediately send a black frame so the old sort order's colors don't linger
+                self.send_black_frame(base_colors.len());
+            }
+            VisualizerMsg::Blackout => {
+                brightness.fill(0.0);
+                prev_max.fill(0.0);
+                speed.fill(0.0);
+                self.suppress_audio_output = true;
                 self.send_black_frame(base_colors.len());
             }
         }
@@ -775,15 +796,16 @@ impl Visualizer {
                 .zip(brightness.iter())
                 .map(|(base, &b)| Oklch::new(base.l * b, base.chroma, base.hue))
                 .collect();
-            if self
-                .nl_udp
-                .update_panels(&display_colors, self.trans_time)
-                .is_err()
+            if !self.suppress_audio_output
+                && self
+                    .nl_udp
+                    .update_panels(&display_colors, self.trans_time)
+                    .is_err()
                 && self.nl_device.request_udp_control().is_ok()
             {
                 let _ = self.nl_udp.update_panels(&display_colors, self.trans_time);
             }
-            if !self.color_subscribers.is_empty() {
+            if !self.suppress_audio_output && !self.color_subscribers.is_empty() {
                 let mut frame = HashMap::with_capacity(display_colors.len());
                 for (i, color) in display_colors.iter().enumerate() {
                     let srgb: Srgb<f32> = Srgb::from_color(*color);
